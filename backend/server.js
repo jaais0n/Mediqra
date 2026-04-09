@@ -1,4 +1,4 @@
-﻿const http = require('node:http');
+const http = require('node:http');
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
@@ -9,7 +9,7 @@ const { instagramGetUrl } = require('instagram-url-direct');
 const ytDlp = require('yt-dlp-exec');
 const ffmpegPath = require('ffmpeg-static');
 
-const PORT = Number(process.env.INSTASAVE_PROXY_PORT || 8787);
+const PORT = Number(process.env.PORT || process.env.INSTASAVE_PROXY_PORT || 8787);
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -184,8 +184,6 @@ async function proxyUpstreamUrl(req, res, target, referer = 'https://www.instagr
       headers: upstreamHeaders,
     });
 
-    // Instagram CDN can reject some requests with strict anti-bot checks.
-    // Retry with an alternate mobile-like header set before failing.
     if (upstream.status === 403) {
       const retryHeaders = {
         Accept: '*/*',
@@ -278,12 +276,14 @@ async function handleYouTubeExtract(req, res, reqUrl) {
 
   if (!target) {
     res.statusCode = 400;
+    res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ error: 'Missing url query parameter' }));
     return;
   }
 
   if (!isYouTubeUrl(target)) {
     res.statusCode = 403;
+    res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ error: 'Host not allowed' }));
     return;
   }
@@ -415,6 +415,13 @@ const server = http.createServer(async (req, res) => {
 
   const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  if (reqUrl.pathname === '/') {
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ service: 'mediqra-backend', ok: true }));
+    return;
+  }
+
   if (reqUrl.pathname === '/health') {
     res.statusCode = 200;
     res.setHeader('content-type', 'application/json');
@@ -426,18 +433,19 @@ const server = http.createServer(async (req, res) => {
     const target = reqUrl.searchParams.get('url');
     if (!target) {
       res.statusCode = 400;
+      res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ error: 'Missing url query parameter' }));
       return;
     }
-    
+
     res.setHeader('content-type', 'application/json');
     try {
       const data = await instagramGetUrl(target);
       res.statusCode = 200;
       res.end(JSON.stringify(data));
-    } catch (e) {
+    } catch (error) {
       res.statusCode = 500;
-      res.end(JSON.stringify({ error: e.message || 'Extraction failed' }));
+      res.end(JSON.stringify({ error: error?.message || 'Extraction failed' }));
     }
     return;
   }
@@ -469,8 +477,6 @@ const server = http.createServer(async (req, res) => {
 server.on('error', (error) => {
   if (error?.code === 'EADDRINUSE') {
     console.error(`Port ${PORT} is already in use.`);
-    console.error('Close the existing proxy process, then run npm run proxy again.');
-    console.error('Windows helper: Get-NetTCPConnection -LocalPort 8787 -State Listen | Select-Object -ExpandProperty OwningProcess | ForEach-Object { Stop-Process -Id $_ -Force }');
     process.exit(1);
   }
 
@@ -479,6 +485,6 @@ server.on('error', (error) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`InstaSave proxy listening on http://0.0.0.0:${PORT}`);
+  console.log(`Mediqra backend listening on http://0.0.0.0:${PORT}`);
   console.log('Health check: /health');
 });

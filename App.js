@@ -41,26 +41,64 @@ const INSTAGRAM_DOWNLOAD_HEADERS = {
   'Sec-Fetch-Site': 'same-site',
 };
 const LOCAL_PROXY_PORT = 8787;
+const API_BASE_URL_STORAGE_FILENAME = 'instasave_api_base_url.txt';
+const CONFIGURED_API_BASE_URLS = [
+  Constants?.expoConfig?.extra?.apiBaseUrl,
+  Constants?.manifest2?.extra?.apiBaseUrl,
+];
+let runtimeApiBaseUrlOverride = '';
 const HISTORY_STORAGE_FILENAME = 'instasave_history.json';
 const DOWNLOADS_DIRECTORY_URI_FILENAME = 'instasave_downloads_directory_uri.txt';
 const LOCAL_DOWNLOADS_DIRNAME = 'downloads';
-const PHONE_DOWNLOADS_SUBFOLDER = 'InstaSave';
 const MEDIA_SUBFOLDERS = {
-  audio: 'Audio',
+  audio: 'MP3',
   video: 'Video',
   image: 'Images',
   other: 'Others',
 };
 const MAX_HISTORY_ITEMS = 12;
 
-function getDevServerHostCandidates() {
-  const hosts = [];
+function normalizeApiBaseUrl(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim().replace(/\/+$/g, '');
+  if (!trimmed) {
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `http://${trimmed}`;
+}
+
+function setRuntimeApiBaseUrlOverride(value) {
+  runtimeApiBaseUrlOverride = normalizeApiBaseUrl(value) || '';
+}
+
+function getConfiguredApiBaseUrlCandidates() {
+  const candidates = [];
+  const runtimeOverride = normalizeApiBaseUrl(runtimeApiBaseUrlOverride);
+  if (runtimeOverride) {
+    candidates.push(runtimeOverride);
+  }
+
+  for (const configuredBaseUrl of CONFIGURED_API_BASE_URLS) {
+    const normalized = normalizeApiBaseUrl(configuredBaseUrl);
+    if (normalized) {
+      candidates.push(normalized);
+    }
+  }
+
   const scriptURL = NativeModules?.SourceCode?.scriptURL;
   if (scriptURL) {
     try {
       const parsed = new URL(scriptURL);
-      if (parsed.hostname) {
-        hosts.push(parsed.hostname);
+      if (parsed.hostname && isRunningInExpoGo()) {
+        candidates.push(`http://${parsed.hostname}:${LOCAL_PROXY_PORT}`);
       }
     } catch {
       // Ignore parse errors and continue with fallbacks.
@@ -73,27 +111,27 @@ function getDevServerHostCandidates() {
     Constants?.expoGoConfig?.debuggerHost;
   if (expoHostUri && typeof expoHostUri === 'string') {
     const host = expoHostUri.split(':')[0];
-    if (host) {
-      hosts.push(host);
+    if (host && isRunningInExpoGo()) {
+      candidates.push(`http://${host}:${LOCAL_PROXY_PORT}`);
     }
   }
 
   const platformServerHost = NativeModules?.PlatformConstants?.ServerHost;
   if (platformServerHost && typeof platformServerHost === 'string') {
     const host = platformServerHost.split(':')[0];
-    if (host) {
-      hosts.push(host);
+    if (host && isRunningInExpoGo()) {
+      candidates.push(`http://${host}:${LOCAL_PROXY_PORT}`);
     }
   }
 
   const seen = new Set();
   const ordered = [];
-  for (const host of hosts) {
-    if (!host || seen.has(host)) {
+  for (const baseUrl of candidates) {
+    if (!baseUrl || seen.has(baseUrl)) {
       continue;
     }
-    seen.add(host);
-    ordered.push(host);
+    seen.add(baseUrl);
+    ordered.push(baseUrl);
   }
 
   return ordered;
@@ -104,8 +142,8 @@ function isRunningInExpoGo() {
   return ownership === 'expo';
 }
 
-function getDevServerHost() {
-  const candidates = getDevServerHostCandidates();
+function getBackendBaseUrl() {
+  const candidates = getConfiguredApiBaseUrlCandidates();
   if (candidates.length === 0) {
     return null;
   }
@@ -113,9 +151,12 @@ function getDevServerHost() {
 }
 
 function buildLocalProxyUrl(targetUrl, referer) {
-  const host = getDevServerHost();
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) {
+    return null;
+  }
   try {
-    const proxyUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/proxy`);
+    const proxyUrl = new URL('/proxy', baseUrl);
     proxyUrl.searchParams.set('url', targetUrl);
     if (referer) {
       proxyUrl.searchParams.set('referer', referer);
@@ -127,9 +168,12 @@ function buildLocalProxyUrl(targetUrl, referer) {
 }
 
 function buildLocalFreshDownloadUrl(postUrl, index = 0) {
-  const host = getDevServerHost();
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) {
+    return null;
+  }
   try {
-    const freshUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/download`);
+    const freshUrl = new URL('/download', baseUrl);
     freshUrl.searchParams.set('postUrl', postUrl);
     freshUrl.searchParams.set('index', String(index));
     return freshUrl.toString();
@@ -139,9 +183,12 @@ function buildLocalFreshDownloadUrl(postUrl, index = 0) {
 }
 
 function buildLocalExtractUrl(targetUrl) {
-  const host = getDevServerHost();
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) {
+    return null;
+  }
   try {
-    const extractUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/extract`);
+    const extractUrl = new URL('/extract', baseUrl);
     extractUrl.searchParams.set('url', targetUrl);
     return extractUrl.toString();
   } catch {
@@ -150,9 +197,12 @@ function buildLocalExtractUrl(targetUrl) {
 }
 
 function buildLocalYouTubeExtractUrl(targetUrl) {
-  const host = getDevServerHost();
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) {
+    return null;
+  }
   try {
-    const extractUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/extract`);
+    const extractUrl = new URL('/youtube/extract', baseUrl);
     extractUrl.searchParams.set('url', targetUrl);
     return extractUrl.toString();
   } catch {
@@ -161,9 +211,12 @@ function buildLocalYouTubeExtractUrl(targetUrl) {
 }
 
 function buildLocalYouTubeDownloadUrl(targetUrl, format, formatId = '') {
-  const host = getDevServerHost();
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) {
+    return null;
+  }
   try {
-    const downloadUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/download`);
+    const downloadUrl = new URL('/youtube/download', baseUrl);
     downloadUrl.searchParams.set('url', targetUrl);
     downloadUrl.searchParams.set('format', format);
     if (formatId) {
@@ -176,10 +229,10 @@ function buildLocalYouTubeDownloadUrl(targetUrl, format, formatId = '') {
 }
 
 function buildProxyUrlsForAllHosts(targetUrl, referer) {
-  return getDevServerHostCandidates()
-    .map((host) => {
+  return getConfiguredApiBaseUrlCandidates()
+    .map((baseUrl) => {
       try {
-        const proxyUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/proxy`);
+        const proxyUrl = new URL('/proxy', baseUrl);
         proxyUrl.searchParams.set('url', targetUrl);
         if (referer) {
           proxyUrl.searchParams.set('referer', referer);
@@ -193,10 +246,10 @@ function buildProxyUrlsForAllHosts(targetUrl, referer) {
 }
 
 function buildFreshDownloadUrlsForAllHosts(postUrl, index = 0) {
-  return getDevServerHostCandidates()
-    .map((host) => {
+  return getConfiguredApiBaseUrlCandidates()
+    .map((baseUrl) => {
       try {
-        const freshUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/download`);
+        const freshUrl = new URL('/download', baseUrl);
         freshUrl.searchParams.set('postUrl', postUrl);
         freshUrl.searchParams.set('index', String(index));
         return freshUrl.toString();
@@ -208,10 +261,10 @@ function buildFreshDownloadUrlsForAllHosts(postUrl, index = 0) {
 }
 
 function buildYouTubeExtractUrlsForAllHosts(targetUrl) {
-  return getDevServerHostCandidates()
-    .map((host) => {
+  return getConfiguredApiBaseUrlCandidates()
+    .map((baseUrl) => {
       try {
-        const extractUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/extract`);
+        const extractUrl = new URL('/youtube/extract', baseUrl);
         extractUrl.searchParams.set('url', targetUrl);
         return extractUrl.toString();
       } catch {
@@ -222,10 +275,10 @@ function buildYouTubeExtractUrlsForAllHosts(targetUrl) {
 }
 
 function buildYouTubeDownloadUrlsForAllHosts(targetUrl, format, formatId = '') {
-  return getDevServerHostCandidates()
-    .map((host) => {
+  return getConfiguredApiBaseUrlCandidates()
+    .map((baseUrl) => {
       try {
-        const downloadUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/download`);
+        const downloadUrl = new URL('/youtube/download', baseUrl);
         downloadUrl.searchParams.set('url', targetUrl);
         downloadUrl.searchParams.set('format', format);
         if (formatId) {
@@ -255,10 +308,47 @@ function getDownloadsDirectoryUriStoragePath() {
   return `${FileSystem.documentDirectory}${DOWNLOADS_DIRECTORY_URI_FILENAME}`;
 }
 
-function isInstaSaveDirectoryUri(uri) {
+function getApiBaseUrlStoragePath() {
+  if (!FileSystem.documentDirectory) {
+    return null;
+  }
+
+  return `${FileSystem.documentDirectory}${API_BASE_URL_STORAGE_FILENAME}`;
+}
+
+async function loadSavedApiBaseUrl() {
+  const storagePath = getApiBaseUrlStoragePath();
+  if (!storagePath) {
+    return null;
+  }
+
+  try {
+    const existing = await FileSystem.getInfoAsync(storagePath);
+    if (!existing?.exists) {
+      return null;
+    }
+
+    const value = await FileSystem.readAsStringAsync(storagePath);
+    return normalizeApiBaseUrl(value || '');
+  } catch {
+    return null;
+  }
+}
+
+async function saveApiBaseUrl(value) {
+  const storagePath = getApiBaseUrlStoragePath();
+  if (!storagePath) {
+    return;
+  }
+
+  const normalized = normalizeApiBaseUrl(value || '') || '';
+  await FileSystem.writeAsStringAsync(storagePath, normalized);
+}
+
+function isDownloadsRootDirectoryUri(uri) {
   try {
     const decoded = decodeURIComponent(String(uri || '')).toLowerCase();
-    return decoded.endsWith(`/download/${PHONE_DOWNLOADS_SUBFOLDER.toLowerCase()}`);
+    return decoded.includes('/tree/primary:download') && !decoded.includes('/document/');
   } catch {
     return false;
   }
@@ -290,6 +380,10 @@ function isDirectoryUriWithName(uri, dirName) {
   } catch {
     return false;
   }
+}
+
+function isDirectoryUriWithAnyName(uri, dirNames = []) {
+  return dirNames.some((dirName) => isDirectoryUriWithName(uri, dirName));
 }
 
 function sanitizeLocalFileName(name, fallbackName = 'downloaded-file') {
@@ -451,7 +545,7 @@ async function loadSavedDownloadsDirectoryUri() {
   try {
     const value = await FileSystem.readAsStringAsync(storagePath);
     const normalized = String(value || '').trim();
-    return normalized || null;
+    return isDownloadsRootDirectoryUri(normalized) ? normalized : null;
   } catch {
     return null;
   }
@@ -624,6 +718,18 @@ function getFileExtensionFromUrl(url, fallbackExtension) {
   }
 
   return fallbackExtension;
+}
+
+function inferInstagramMediaKindFromUrl(url, fallbackKind = 'image') {
+  const extension = getFileExtensionFromUrl(url, '');
+  if (['.mp4', '.mov', '.m4v'].includes(extension)) {
+    return 'video';
+  }
+  if (['.jpg', '.jpeg', '.png', '.webp'].includes(extension)) {
+    return 'image';
+  }
+
+  return fallbackKind;
 }
 
 function extractFilenameFromContentDisposition(contentDispositionValue) {
@@ -1054,6 +1160,68 @@ function extractGraphVideoUrls(payload) {
   return Array.from(urls);
 }
 
+function extractGraphImageUrls(payload) {
+  const urls = new Set();
+
+  const pushUrl = (value) => {
+    if (typeof value !== 'string' || !value.includes('http')) {
+      return;
+    }
+    const decoded = decodeEmbedUrlValue(value);
+    if (decoded) {
+      urls.add(decoded);
+    }
+  };
+
+  const collectFromMedia = (media) => {
+    if (!media || typeof media !== 'object') {
+      return;
+    }
+
+    if (typeof media.display_url === 'string') {
+      pushUrl(media.display_url);
+    }
+
+    if (Array.isArray(media.display_resources)) {
+      media.display_resources.forEach((resource) => {
+        pushUrl(resource?.src);
+      });
+    }
+
+    const imageCandidates = media?.image_versions2?.candidates;
+    if (Array.isArray(imageCandidates)) {
+      imageCandidates.forEach((candidate) => {
+        pushUrl(candidate?.url);
+      });
+    }
+
+    if (Array.isArray(media.carousel_media)) {
+      media.carousel_media.forEach((item) => {
+        collectFromMedia(item);
+      });
+    }
+
+    const sidecarEdges = media?.edge_sidecar_to_children?.edges;
+    if (Array.isArray(sidecarEdges)) {
+      sidecarEdges.forEach((edge) => {
+        collectFromMedia(edge?.node);
+      });
+    }
+  };
+
+  if (payload?.graphql?.shortcode_media) {
+    collectFromMedia(payload.graphql.shortcode_media);
+  }
+
+  if (Array.isArray(payload?.items)) {
+    payload.items.forEach((item) => {
+      collectFromMedia(item);
+    });
+  }
+
+  return Array.from(urls);
+}
+
 async function resolveInstagramMediaInfos(instagramLink) {
   const normalizedLink = normalizeInstagramPostUrl(instagramLink);
   const isReel = /\/reel\//i.test(normalizedLink);
@@ -1066,20 +1234,57 @@ async function resolveInstagramMediaInfos(instagramLink) {
       const extRes = await fetch(extractUrl, { headers: { Accept: 'application/json' } });
       if (extRes.ok) {
         const extData = await extRes.json();
-        const foundUrls = [];
+        const proxyItems = [];
 
-        if (extData && extData.url_list && extData.url_list.length > 0) {
-          foundUrls.push(...extData.url_list);
-        } else if (extData && extData.media_details && extData.media_details.length > 0) {
-          extData.media_details.forEach(item => {
-            if (item.url) foundUrls.push(item.url);
+        if (extData && Array.isArray(extData.media_details) && extData.media_details.length > 0) {
+          extData.media_details.forEach((item) => {
+            if (!item?.url) {
+              return;
+            }
+
+            const declaredType = String(item?.type || '').toLowerCase();
+            const kind = declaredType === 'video' || declaredType === 'image'
+              ? declaredType
+              : inferInstagramMediaKindFromUrl(item.url, isReel ? 'video' : 'image');
+
+            proxyItems.push({
+              url: item.url,
+              kind,
+              extension: getFileExtensionFromUrl(item.url, kind === 'video' ? '.mp4' : '.jpg'),
+            });
           });
         }
-        
-        const extractedVids = normalizeMediaItems(foundUrls, 'video', '.mp4');
-        if (extractedVids.length > 0) {
-          console.log('Success via Local Extraction API:', extractedVids.length);
-          return extractedVids;
+
+        if (extData && Array.isArray(extData.url_list) && extData.url_list.length > 0) {
+          extData.url_list.forEach((url) => {
+            if (!url) {
+              return;
+            }
+
+            const kind = inferInstagramMediaKindFromUrl(url, isReel ? 'video' : 'image');
+            proxyItems.push({
+              url,
+              kind,
+              extension: getFileExtensionFromUrl(url, kind === 'video' ? '.mp4' : '.jpg'),
+            });
+          });
+        }
+
+        if (proxyItems.length > 0) {
+          const deduped = [];
+          const seen = new Set();
+          for (const item of proxyItems) {
+            if (!item?.url || seen.has(item.url)) {
+              continue;
+            }
+            seen.add(item.url);
+            deduped.push(item);
+          }
+
+          if (deduped.length > 0) {
+            console.log('Success via Local Extraction API:', deduped.length);
+            return deduped;
+          }
         }
       }
     } catch (e) {
@@ -1210,6 +1415,13 @@ async function resolveInstagramMediaInfos(instagramLink) {
       if (finalVideos.length > 0) {
         return normalizeMediaItems(finalVideos, 'video', '.mp4');
       }
+
+      if (!isReel) {
+        const graphImages = payload ? extractGraphImageUrls(payload) : [];
+        if (graphImages.length > 0) {
+          return normalizeMediaItems(graphImages, 'image', '.jpg');
+        }
+      }
     }
   } catch {
     // Fall through to oEmbed and HTML scraping below.
@@ -1322,6 +1534,7 @@ async function resolveInstagramMediaInfos(instagramLink) {
 
 export default function App() {
   const [manualLink, setManualLink] = useState('');
+  const [apiBaseUrlInput, setApiBaseUrlInput] = useState(() => getBackendBaseUrl() || '');
   const [youtubeOptions, setYoutubeOptions] = useState(null);
   const [isCheckingYouTubeOptions, setIsCheckingYouTubeOptions] = useState(false);
   const [youtubeOptionsError, setYoutubeOptionsError] = useState('');
@@ -1349,6 +1562,8 @@ export default function App() {
   const androidMediaSubfolderUriRef = useRef({});
   const instagramLink = extractInstagramLink(manualLink);
   const youtubeLink = extractYouTubeLink(manualLink);
+  const normalizedApiBaseUrl = normalizeApiBaseUrl(apiBaseUrlInput);
+  const backendConfigured = Boolean(normalizedApiBaseUrl || getBackendBaseUrl());
   const sourceType = instagramLink ? 'instagram' : (youtubeLink ? 'youtube' : 'unknown');
   const hasLink = sourceType !== 'unknown';
   const activeLink = sourceType === 'youtube' ? youtubeLink : instagramLink;
@@ -1356,7 +1571,7 @@ export default function App() {
   const recentDownloads = downloadHistory.slice(0, MAX_HISTORY_ITEMS);
   const favoriteDownloads = downloadHistory.filter((item) => item.favorite);
   const isYouTubeActive = sourceType === 'youtube';
-  const showYouTubePanel = isYouTubeActive || isPotentialYouTubeInput;
+  const showYouTubePanel = backendConfigured && (isYouTubeActive || isPotentialYouTubeInput);
   const sourceLabel = isYouTubeActive ? 'YouTube' : 'Instagram';
   const sortedMp4Options = sortYouTubeMp4Options(youtubeOptions?.mp4Options || []).filter((item) => parseResolutionHeight(item?.resolution) >= 720);
   const sortedMp3Options = sortYouTubeMp3Options(youtubeOptions?.mp3Options || []);
@@ -1371,6 +1586,30 @@ export default function App() {
     { id: 'download', label: 'Download', icon: 'paper-plane-outline', activeIcon: 'paper-plane' },
     { id: 'favorites', label: 'Favorites', icon: 'star-outline', activeIcon: 'star' },
   ];
+
+  useEffect(() => {
+    setRuntimeApiBaseUrlOverride(apiBaseUrlInput);
+  }, [apiBaseUrlInput]);
+
+  useEffect(() => {
+    let active = true;
+
+    loadSavedApiBaseUrl()
+      .then((savedUrl) => {
+        if (!active || !savedUrl) {
+          return;
+        }
+        setApiBaseUrlInput(savedUrl);
+        setRuntimeApiBaseUrlOverride(savedUrl);
+      })
+      .catch(() => {
+        // Ignore storage-read errors.
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     contentAnim.setValue(0);
@@ -1527,9 +1766,11 @@ export default function App() {
 
     const saf = FileSystem.StorageAccessFramework;
     const mimeType = guessMimeTypeFromFileName(safeName, kind);
+    const fileNameWithoutExtension = safeName.replace(/\.[^/.]+$/, '') || `instasave_${Date.now()}`;
 
     const pickDirectoryManually = async () => {
-      const manualPermission = await saf.requestDirectoryPermissionsAsync();
+      const initialDownloadsTreeUri = 'content://com.android.externalstorage.documents/tree/primary%3ADownload';
+      const manualPermission = await saf.requestDirectoryPermissionsAsync(initialDownloadsTreeUri);
       if (!manualPermission?.granted || !manualPermission?.directoryUri) {
         throw new Error('Folder selection was cancelled.');
       }
@@ -1541,35 +1782,11 @@ export default function App() {
     };
 
     let directoryUri = androidDownloadsDirectoryUriRef.current;
-    if (!directoryUri || !isInstaSaveDirectoryUri(directoryUri)) {
+    if (!directoryUri || !isDownloadsRootDirectoryUri(directoryUri)) {
       try {
-        const initialDownloadsTreeUri = 'content://com.android.externalstorage.documents/tree/primary%3ADownload';
-        let downloadsRootUri = null;
-
-        if (directoryUri && !isInstaSaveDirectoryUri(directoryUri)) {
-          downloadsRootUri = directoryUri;
-        } else {
-          const permission = await saf.requestDirectoryPermissionsAsync(initialDownloadsTreeUri);
-          if (!permission?.granted || !permission?.directoryUri) {
-            throw new Error('Downloads folder permission was not granted.');
-          }
-
-          downloadsRootUri = permission.directoryUri;
-        }
-
-        const existingEntries = await saf.readDirectoryAsync(downloadsRootUri);
-        const existingFolderUri = existingEntries.find((entryUri) => isInstaSaveDirectoryUri(entryUri));
-        if (existingFolderUri) {
-          directoryUri = existingFolderUri;
-        } else {
-          directoryUri = await saf.makeDirectoryAsync(downloadsRootUri, PHONE_DOWNLOADS_SUBFOLDER);
-        }
-
-        androidDownloadsDirectoryUriRef.current = directoryUri;
-        androidMediaSubfolderUriRef.current = {};
-        await saveDownloadsDirectoryUri(directoryUri);
+        directoryUri = await pickDirectoryManually();
       } catch (autoDirectoryError) {
-        console.log('Automatic InstaSave folder setup failed:', autoDirectoryError?.message || autoDirectoryError);
+        console.log('Automatic Downloads folder setup failed:', autoDirectoryError?.message || autoDirectoryError);
         directoryUri = await pickDirectoryManually();
       }
     }
@@ -1578,7 +1795,13 @@ export default function App() {
     let targetDirectoryUri = androidMediaSubfolderUriRef.current[subfolderName];
     if (!targetDirectoryUri) {
       const existingEntries = await saf.readDirectoryAsync(directoryUri);
-      const existingSubfolderUri = existingEntries.find((entryUri) => isDirectoryUriWithName(entryUri, subfolderName));
+      const subfolderAliases = subfolderName === MEDIA_SUBFOLDERS.audio
+          ? [MEDIA_SUBFOLDERS.audio, 'Audio']
+        : subfolderName === MEDIA_SUBFOLDERS.video
+          ? [MEDIA_SUBFOLDERS.video, 'Videos']
+          : [subfolderName];
+
+      const existingSubfolderUri = existingEntries.find((entryUri) => isDirectoryUriWithAnyName(entryUri, subfolderAliases));
 
       if (existingSubfolderUri) {
         targetDirectoryUri = existingSubfolderUri;
@@ -1594,16 +1817,22 @@ export default function App() {
 
     let destinationUri;
     try {
-      destinationUri = await saf.createFileAsync(targetDirectoryUri, safeName, mimeType);
+      destinationUri = await saf.createFileAsync(targetDirectoryUri, fileNameWithoutExtension, mimeType);
     } catch (createError) {
       console.log('Primary file create failed:', createError?.message || createError);
       try {
-        destinationUri = await saf.createFileAsync(targetDirectoryUri, `${Date.now()}_${safeName}`, mimeType);
+        destinationUri = await saf.createFileAsync(targetDirectoryUri, `${Date.now()}_${fileNameWithoutExtension}`, mimeType);
       } catch {
         directoryUri = await pickDirectoryManually();
         const manualSubfolderName = getMediaSubfolderName(kind, safeName);
         const manualEntries = await saf.readDirectoryAsync(directoryUri);
-        const manualSubfolderUri = manualEntries.find((entryUri) => isDirectoryUriWithName(entryUri, manualSubfolderName))
+        const manualAliases = manualSubfolderName === MEDIA_SUBFOLDERS.audio
+          ? [MEDIA_SUBFOLDERS.audio, 'Audio']
+          : manualSubfolderName === MEDIA_SUBFOLDERS.video
+            ? [MEDIA_SUBFOLDERS.video, 'Videos']
+            : [manualSubfolderName];
+
+        const manualSubfolderUri = manualEntries.find((entryUri) => isDirectoryUriWithAnyName(entryUri, manualAliases))
           || await saf.makeDirectoryAsync(directoryUri, manualSubfolderName);
 
         androidMediaSubfolderUriRef.current = {
@@ -1611,7 +1840,7 @@ export default function App() {
           [manualSubfolderName]: manualSubfolderUri,
         };
 
-        destinationUri = await saf.createFileAsync(manualSubfolderUri, safeName, mimeType);
+        destinationUri = await saf.createFileAsync(manualSubfolderUri, fileNameWithoutExtension, mimeType);
       }
     }
 
@@ -1619,7 +1848,7 @@ export default function App() {
       encoding: FileSystem.EncodingType.Base64,
     });
 
-    await FileSystem.writeAsStringAsync(destinationUri, fileBase64, {
+    await saf.writeAsStringAsync(destinationUri, fileBase64, {
       encoding: FileSystem.EncodingType.Base64,
     });
 
@@ -1969,7 +2198,7 @@ export default function App() {
       : (fallbackCandidate ? [fallbackCandidate] : []);
 
     if (candidateUrls.length === 0) {
-      throw new Error('Could not build local YouTube extraction URL. Start Expo in LAN mode.');
+      throw new Error('Backend API is not configured. Set a production backend URL for YouTube downloads.');
     }
 
     let lastError = null;
@@ -2092,28 +2321,26 @@ export default function App() {
           Referer: normalizedLinkForRequest,
         };
 
-        // Force proxy first to bypass device-side Instagram CDN blocks.
+        // If a backend is configured, try it first; otherwise rely on the direct media URL.
         let downloadResult = null;
         const freshDownloadUrl = buildLocalFreshDownloadUrl(normalizedLinkForRequest, index);
         const proxyUrl = buildLocalProxyUrl(mediaInfo.url, normalizedLinkForRequest);
         const freshDownloadCandidates = buildFreshDownloadUrlsForAllHosts(normalizedLinkForRequest, index);
         const proxyCandidates = buildProxyUrlsForAllHosts(mediaInfo.url, normalizedLinkForRequest);
 
-        // For reels/videos, try a fresh server-side URL resolution first (avoids expired URLs).
-        if (mediaInfo.kind === 'video') {
-          const candidateUrls = freshDownloadCandidates.length > 0
-            ? freshDownloadCandidates
-            : (freshDownloadUrl ? [freshDownloadUrl] : []);
-          for (const candidateUrl of candidateUrls) {
-            try {
-              downloadResult = await FileSystem.downloadAsync(candidateUrl, targetPath);
-            } catch {
-              downloadResult = null;
-            }
-            const status = typeof downloadResult?.status === 'number' ? downloadResult.status : null;
-            if (downloadResult && (status === null || status < 400)) {
-              break;
-            }
+        // Try fresh server-side URL resolution first (avoids expired Instagram CDN URLs).
+        const freshCandidates = freshDownloadCandidates.length > 0
+          ? freshDownloadCandidates
+          : (freshDownloadUrl ? [freshDownloadUrl] : []);
+        for (const candidateUrl of freshCandidates) {
+          try {
+            downloadResult = await FileSystem.downloadAsync(candidateUrl, targetPath);
+          } catch {
+            downloadResult = null;
+          }
+          const status = typeof downloadResult?.status === 'number' ? downloadResult.status : null;
+          if (downloadResult && (status === null || status < 400)) {
+            break;
           }
         }
 
@@ -2146,7 +2373,7 @@ export default function App() {
         }
 
         if (!downloadResult) {
-          throw new Error('Download request failed. Start local proxy with: npm run proxy');
+          throw new Error('Download request failed. Configure a production backend URL or try another public Instagram post.');
         }
 
         if (typeof downloadResult.status === 'number' && downloadResult.status >= 400) {
@@ -2165,7 +2392,7 @@ export default function App() {
           }
 
           if (typeof downloadResult.status === 'number' && downloadResult.status >= 400) {
-            throw new Error(`Media download blocked (status ${downloadResult.status}). Ensure proxy is running: npm run proxy`);
+            throw new Error(`Media download blocked (status ${downloadResult.status}). Configure a production backend URL or try another public Instagram post.`);
           }
         }
 
@@ -2224,8 +2451,8 @@ export default function App() {
       Alert.alert(
         'Download failed',
         errorMessage
-          ? `${errorMessage} Try another public post/reel link or use a downloader API.`
-          : 'Instagram did not expose a public media URL for this post. Try another public post/reel link or use a downloader API.'
+          ? `${errorMessage}`
+          : 'Instagram did not expose a public media URL for this post. Use a production backend for better reliability.'
       );
     } finally {
       setIsDownloading(false);
@@ -2277,7 +2504,7 @@ export default function App() {
         : (fallbackCandidate ? [fallbackCandidate] : []);
 
       if (candidateUrls.length === 0) {
-        throw new Error('Could not build local YouTube download URL.');
+        throw new Error('Backend API is not configured. Set a production backend URL for YouTube downloads.');
       }
 
       let downloadResult = null;
@@ -2305,11 +2532,11 @@ export default function App() {
       }
 
       if (!downloadResult) {
-        throw new Error('YouTube download failed. Ensure local proxy is running: npm run proxy');
+        throw new Error('YouTube download failed. Configure a production backend URL before using YouTube downloads.');
       }
 
       if (typeof downloadResult.status === 'number' && downloadResult.status >= 400) {
-        throw new Error(`YouTube download blocked (status ${downloadResult.status}). Ensure proxy is running: npm run proxy`);
+        throw new Error(`YouTube download blocked (status ${downloadResult.status}). Configure a production backend URL before using YouTube downloads.`);
       }
 
       const youtubeTitle = loadedOptions?.title || 'youtube';
@@ -2352,7 +2579,7 @@ export default function App() {
       Alert.alert(
         'Download failed',
         errorMessage
-          ? `${errorMessage} Try another YouTube link or check proxy logs.`
+          ? `${errorMessage}`
           : 'Unable to download this YouTube video right now. Try again shortly.'
       );
     } finally {
@@ -2370,16 +2597,42 @@ export default function App() {
 
     const youtubeCandidate = extractYouTubeLink(link);
     if (youtubeCandidate) {
+      if (!backendConfigured) {
+        Alert.alert('Backend required', 'YouTube downloads require a production backend API URL. Configure `expo.extra.apiBaseUrl` and rebuild the app.');
+        return;
+      }
       downloadYouTubeFromLink(youtubeCandidate, preferredFormat, preferredFormatId);
       return;
     }
 
     Alert.alert('Invalid link', 'Paste a valid Instagram or YouTube link to continue.');
-  }, [downloadInstagramFromLink, downloadYouTubeFromLink]);
+  }, [backendConfigured, downloadInstagramFromLink, downloadYouTubeFromLink]);
 
   const onDownload = useCallback(() => {
+    if (!backendConfigured) {
+      Alert.alert('Backend required', 'Set your production backend API URL first, then try downloading.');
+      return;
+    }
+
     downloadFromLink(activeLink, selectedYouTubeFormat, selectedYouTubeFormatId);
-  }, [activeLink, downloadFromLink, selectedYouTubeFormat, selectedYouTubeFormatId]);
+  }, [activeLink, backendConfigured, downloadFromLink, selectedYouTubeFormat, selectedYouTubeFormatId]);
+
+  const onSaveBackendUrl = useCallback(async () => {
+    const normalized = normalizeApiBaseUrl(apiBaseUrlInput || '');
+    if (!normalized) {
+      Alert.alert('Invalid backend URL', 'Enter a valid API URL like https://api.yourdomain.com');
+      return;
+    }
+
+    setApiBaseUrlInput(normalized);
+    setRuntimeApiBaseUrlOverride(normalized);
+    try {
+      await saveApiBaseUrl(normalized);
+      Alert.alert('Backend saved', `API base URL set to ${normalized}`);
+    } catch {
+      Alert.alert('Save failed', 'Could not persist backend URL on this device.');
+    }
+  }, [apiBaseUrlInput]);
 
   const onCheckYouTubeOptions = useCallback(async () => {
     if (!youtubeLink) {
@@ -2500,7 +2753,7 @@ export default function App() {
       >
         <View style={styles.header}>
           <View style={styles.kickerPill}>
-            <Text style={styles.kickerText}>InstaSave</Text>
+            <Text style={styles.kickerText}>Mediqra</Text>
           </View>
           <Text style={styles.title}>Download Instagram media</Text>
           <Text style={styles.subtitle}>
@@ -2565,6 +2818,31 @@ export default function App() {
                 <Text style={styles.helperTextSecondary}>
                   Files are saved to app local storage first, and then to gallery when device permissions allow it.
                 </Text>
+
+                <View style={styles.backendConfigCard}>
+                  <View style={styles.backendConfigHeader}>
+                    <Text style={styles.backendConfigTitle}>Production backend API URL</Text>
+                    <Text style={[styles.backendConfigStatus, backendConfigured ? styles.backendConfigStatusOk : styles.backendConfigStatusWarn]}>
+                      {backendConfigured ? 'Configured' : 'Required'}
+                    </Text>
+                  </View>
+                  <TextInput
+                    value={apiBaseUrlInput}
+                    onChangeText={setApiBaseUrlInput}
+                    placeholder="https://api.yourdomain.com"
+                    placeholderTextColor="#94a3b8"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete="off"
+                    textContentType="URL"
+                    keyboardType="url"
+                    returnKeyType="done"
+                    style={styles.backendConfigInput}
+                  />
+                  <Pressable onPress={onSaveBackendUrl} style={styles.backendConfigButton}>
+                    <Text style={styles.backendConfigButtonText}>Save backend URL</Text>
+                  </Pressable>
+                </View>
 
                 {showYouTubePanel && (
                   <View style={styles.youtubePanel}>
@@ -3133,6 +3411,67 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     color: '#94a3b8',
+  },
+  backendConfigCard: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    backgroundColor: '#f8fafc',
+  },
+  backendConfigHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  backendConfigTitle: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '800',
+    color: '#0f172a',
+    flex: 1,
+    marginRight: 8,
+  },
+  backendConfigStatus: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '700',
+  },
+  backendConfigStatusOk: {
+    color: '#059669',
+  },
+  backendConfigStatusWarn: {
+    color: '#b45309',
+  },
+  backendConfigInput: {
+    borderWidth: 1,
+    borderColor: '#d5deea',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+    color: '#0f172a',
+    backgroundColor: '#ffffff',
+  },
+  backendConfigButton: {
+    marginTop: 8,
+    minHeight: 34,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#0f172a',
+    backgroundColor: '#0f172a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  backendConfigButtonText: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+    color: '#ffffff',
   },
   youtubePanel: {
     marginTop: 12,

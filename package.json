@@ -23,5 +23,10 @@
     "react-native": "0.81.5",
     "yt-dlp-exec": "^1.0.2"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "@types/react": "~19.1.10",
+    "expo-module-scripts": "^55.0.2",
+    "typescript": "~5.9.2"
+  }
 }
