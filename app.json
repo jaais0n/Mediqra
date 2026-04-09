@@ -33,7 +33,7 @@
       [
         "expo-media-library",
         {
-          "granularPermissions": ["photo", "video"]
+          "granularPermissions": ["photo", "video", "audio"]
         }
       ]
     ],

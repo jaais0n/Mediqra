@@ -71,6 +71,21 @@ function pickYouTubeOptions(info) {
   const formats = Array.isArray(info?.formats) ? info.formats : [];
   const mp4Options = formats
     .filter((format) => format?.ext === 'mp4' && format?.vcodec !== 'none')
+    .sort((left, right) => {
+      const rightFps = Number(right?.fps || 0);
+      const leftFps = Number(left?.fps || 0);
+      if (rightFps !== leftFps) {
+        return rightFps - leftFps;
+      }
+
+      const leftHeight = Number(String(left?.height || 0).replace(/[^0-9]/g, '')) || 0;
+      const rightHeight = Number(String(right?.height || 0).replace(/[^0-9]/g, '')) || 0;
+      if (rightHeight !== leftHeight) {
+        return rightHeight - leftHeight;
+      }
+
+      return Number(right?.filesize || right?.filesize_approx || 0) - Number(left?.filesize || left?.filesize_approx || 0);
+    })
     .map((format) => ({
       formatId: format.format_id,
       ext: format.ext,
@@ -81,10 +96,25 @@ function pickYouTubeOptions(info) {
       filesize: format.filesize || format.filesize_approx || null,
       url: format.url,
     }))
-    .slice(0, 5);
+    .slice(0, 30);
 
   const mp3Options = formats
     .filter((format) => format?.acodec !== 'none' && format?.vcodec === 'none')
+    .sort((left, right) => {
+      const rightAbr = Number(right?.abr || 0);
+      const leftAbr = Number(left?.abr || 0);
+      if (rightAbr !== leftAbr) {
+        return rightAbr - leftAbr;
+      }
+
+      const rightAsr = Number(right?.asr || 0);
+      const leftAsr = Number(left?.asr || 0);
+      if (rightAsr !== leftAsr) {
+        return rightAsr - leftAsr;
+      }
+
+      return Number(right?.filesize || right?.filesize_approx || 0) - Number(left?.filesize || left?.filesize_approx || 0);
+    })
     .map((format) => ({
       formatId: format.format_id,
       ext: format.ext,
@@ -93,7 +123,7 @@ function pickYouTubeOptions(info) {
       filesize: format.filesize || format.filesize_approx || null,
       url: format.url,
     }))
-    .slice(0, 5);
+    .slice(0, 30);
 
   return { mp4Options, mp3Options };
 }
@@ -283,6 +313,7 @@ async function handleYouTubeExtract(req, res, reqUrl) {
 async function handleYouTubeDownload(req, res, reqUrl) {
   const target = reqUrl.searchParams.get('url');
   const format = (reqUrl.searchParams.get('format') || 'mp4').toLowerCase();
+  const requestedFormatId = (reqUrl.searchParams.get('formatId') || '').trim();
 
   if (!target) {
     res.statusCode = 400;
@@ -302,13 +333,19 @@ async function handleYouTubeDownload(req, res, reqUrl) {
     return;
   }
 
+  if (requestedFormatId && !/^[a-zA-Z0-9_.+-]+$/.test(requestedFormatId)) {
+    res.statusCode = 400;
+    res.end('Invalid formatId');
+    return;
+  }
+
   const tempRoot = path.join(os.tmpdir(), 'instasave-youtube');
   const tempDirectory = path.join(tempRoot, `${Date.now()}-${randomUUID()}`);
   await fsPromises.mkdir(tempDirectory, { recursive: true });
 
   try {
     const info = await getYouTubeInfo(target);
-    const baseName = sanitizeFileSegment(info.id || info.title || 'youtube');
+    const baseName = sanitizeFileSegment(info.title || info.id || 'youtube');
     const outputTemplate = path.join(tempDirectory, `${baseName}-${format}.%(ext)s`);
 
     const flags = {
@@ -320,11 +357,12 @@ async function handleYouTubeDownload(req, res, reqUrl) {
     };
 
     if (format === 'mp3') {
+      flags.format = requestedFormatId || 'bestaudio/best';
       flags.extractAudio = true;
       flags.audioFormat = 'mp3';
       flags.audioQuality = '0';
     } else {
-      flags.format = 'bv*+ba/b';
+      flags.format = requestedFormatId ? `${requestedFormatId}+ba/b[ext=mp4]/b` : 'bv*+ba/b';
       flags.mergeOutputFormat = 'mp4';
     }
 
@@ -426,6 +464,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   await handleProxy(req, res, reqUrl);
+});
+
+server.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use.`);
+    console.error('Close the existing proxy process, then run npm run proxy again.');
+    console.error('Windows helper: Get-NetTCPConnection -LocalPort 8787 -State Listen | Select-Object -ExpandProperty OwningProcess | ForEach-Object { Stop-Process -Id $_ -Force }');
+    process.exit(1);
+  }
+
+  console.error('Proxy server startup failed:', error?.message || error);
+  process.exit(1);
 });
 
 server.listen(PORT, '0.0.0.0', () => {

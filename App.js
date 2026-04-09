@@ -4,6 +4,7 @@ import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
+import * as Sharing from 'expo-sharing';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import {
@@ -22,11 +23,12 @@ import {
   TextInput,
   View,
   Linking,
+  Platform,
   Share,
 } from 'react-native';
 
 const INSTAGRAM_LINK_REGEX = /(https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\/[^\s]+)/i;
-const YOUTUBE_LINK_REGEX = /(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\/[^\s]+)/i;
+const YOUTUBE_LINK_REGEX = /(https?:\/\/(?:[a-z0-9-]+\.)?(?:youtube\.com|youtu\.be)\/[^\s]+)/i;
 const INSTAGRAM_DOWNLOAD_HEADERS = {
   Accept: '*/*',
   'Accept-Language': 'en-US,en;q=0.9',
@@ -40,6 +42,15 @@ const INSTAGRAM_DOWNLOAD_HEADERS = {
 };
 const LOCAL_PROXY_PORT = 8787;
 const HISTORY_STORAGE_FILENAME = 'instasave_history.json';
+const DOWNLOADS_DIRECTORY_URI_FILENAME = 'instasave_downloads_directory_uri.txt';
+const LOCAL_DOWNLOADS_DIRNAME = 'downloads';
+const PHONE_DOWNLOADS_SUBFOLDER = 'InstaSave';
+const MEDIA_SUBFOLDERS = {
+  audio: 'Audio',
+  video: 'Video',
+  image: 'Images',
+  other: 'Others',
+};
 const MAX_HISTORY_ITEMS = 12;
 
 function getDevServerHostCandidates() {
@@ -86,6 +97,11 @@ function getDevServerHostCandidates() {
   }
 
   return ordered;
+}
+
+function isRunningInExpoGo() {
+  const ownership = Constants?.appOwnership;
+  return ownership === 'expo';
 }
 
 function getDevServerHost() {
@@ -144,12 +160,15 @@ function buildLocalYouTubeExtractUrl(targetUrl) {
   }
 }
 
-function buildLocalYouTubeDownloadUrl(targetUrl, format) {
+function buildLocalYouTubeDownloadUrl(targetUrl, format, formatId = '') {
   const host = getDevServerHost();
   try {
     const downloadUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/download`);
     downloadUrl.searchParams.set('url', targetUrl);
     downloadUrl.searchParams.set('format', format);
+    if (formatId) {
+      downloadUrl.searchParams.set('formatId', formatId);
+    }
     return downloadUrl.toString();
   } catch {
     return null;
@@ -202,13 +221,16 @@ function buildYouTubeExtractUrlsForAllHosts(targetUrl) {
     .filter(Boolean);
 }
 
-function buildYouTubeDownloadUrlsForAllHosts(targetUrl, format) {
+function buildYouTubeDownloadUrlsForAllHosts(targetUrl, format, formatId = '') {
   return getDevServerHostCandidates()
     .map((host) => {
       try {
         const downloadUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/download`);
         downloadUrl.searchParams.set('url', targetUrl);
         downloadUrl.searchParams.set('format', format);
+        if (formatId) {
+          downloadUrl.searchParams.set('formatId', formatId);
+        }
         return downloadUrl.toString();
       } catch {
         return null;
@@ -225,6 +247,186 @@ function getHistoryStoragePath() {
   return `${FileSystem.documentDirectory}${HISTORY_STORAGE_FILENAME}`;
 }
 
+function getDownloadsDirectoryUriStoragePath() {
+  if (!FileSystem.documentDirectory) {
+    return null;
+  }
+
+  return `${FileSystem.documentDirectory}${DOWNLOADS_DIRECTORY_URI_FILENAME}`;
+}
+
+function isInstaSaveDirectoryUri(uri) {
+  try {
+    const decoded = decodeURIComponent(String(uri || '')).toLowerCase();
+    return decoded.endsWith(`/download/${PHONE_DOWNLOADS_SUBFOLDER.toLowerCase()}`);
+  } catch {
+    return false;
+  }
+}
+
+function getMediaSubfolderName(kind = '', fileName = '') {
+  const loweredKind = String(kind || '').toLowerCase();
+  const loweredFileName = String(fileName || '').toLowerCase();
+
+  if (loweredKind === 'audio' || loweredFileName.endsWith('.mp3')) {
+    return MEDIA_SUBFOLDERS.audio;
+  }
+
+  if (loweredKind === 'video' || loweredFileName.endsWith('.mp4') || loweredFileName.endsWith('.mov') || loweredFileName.endsWith('.m4v')) {
+    return MEDIA_SUBFOLDERS.video;
+  }
+
+  if (loweredKind === 'image' || loweredFileName.endsWith('.jpg') || loweredFileName.endsWith('.jpeg') || loweredFileName.endsWith('.png') || loweredFileName.endsWith('.webp')) {
+    return MEDIA_SUBFOLDERS.image;
+  }
+
+  return MEDIA_SUBFOLDERS.other;
+}
+
+function isDirectoryUriWithName(uri, dirName) {
+  try {
+    const decoded = decodeURIComponent(String(uri || '')).toLowerCase();
+    return decoded.endsWith(`/${String(dirName || '').toLowerCase()}`);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeLocalFileName(name, fallbackName = 'downloaded-file') {
+  const normalized = String(name || fallbackName)
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/[\x00-\x1F\x7F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized || fallbackName;
+}
+
+function buildSafeSavedFileName(baseName, extension = '') {
+  const normalizedExt = extension
+    ? (String(extension).startsWith('.') ? String(extension) : `.${String(extension)}`)
+    : '';
+
+  const safeBase = sanitizeLocalFileName(baseName, 'downloaded-file')
+    .replace(/[.\s]+$/g, '')
+    .slice(0, 80)
+    .trim();
+
+  const finalBase = safeBase || `download_${Date.now()}`;
+  return `${finalBase}${normalizedExt}`;
+}
+
+function guessMimeTypeFromFileName(fileName, kind = '') {
+  const lowered = String(fileName || '').toLowerCase();
+
+  if (lowered.endsWith('.mp4') || kind === 'video') {
+    return 'video/mp4';
+  }
+  if (lowered.endsWith('.mp3') || kind === 'audio') {
+    return 'audio/mpeg';
+  }
+  if (lowered.endsWith('.jpg') || lowered.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
+  if (lowered.endsWith('.png')) {
+    return 'image/png';
+  }
+  if (lowered.endsWith('.webp')) {
+    return 'image/webp';
+  }
+
+  return 'application/octet-stream';
+}
+
+async function ensureLocalDownloadsDirectory() {
+  if (!FileSystem.documentDirectory) {
+    return null;
+  }
+
+  const directory = `${FileSystem.documentDirectory}${LOCAL_DOWNLOADS_DIRNAME}/`;
+  try {
+    await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+  } catch {
+    // Directory may already exist.
+  }
+
+  return directory;
+}
+
+async function saveFileToLocalDownloads(sourceUri, preferredFileName) {
+  const directory = await ensureLocalDownloadsDirectory();
+  if (!directory) {
+    return sourceUri;
+  }
+
+  const safeName = sanitizeLocalFileName(preferredFileName, `instasave_${Date.now()}`);
+  const candidatePath = `${directory}${safeName}`;
+
+  const existing = await FileSystem.getInfoAsync(candidatePath);
+  const targetPath = existing?.exists
+    ? `${directory}${Date.now()}_${safeName}`
+    : candidatePath;
+
+  await FileSystem.copyAsync({ from: sourceUri, to: targetPath });
+  return targetPath;
+}
+
+async function resolveExistingLocalFileUri(item) {
+  const directCandidates = [item?.localFileUri, item?.savedUri].filter(Boolean);
+
+  for (const candidate of directCandidates) {
+    if (typeof candidate === 'string' && /^(content|file):\/\//i.test(candidate)) {
+      return candidate;
+    }
+
+    try {
+      const info = await FileSystem.getInfoAsync(candidate);
+      if (info?.exists) {
+        return candidate;
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  if (!item?.savedFileName) {
+    return null;
+  }
+
+  const downloadsDir = await ensureLocalDownloadsDirectory();
+  if (!downloadsDir) {
+    return null;
+  }
+
+  const fallbackPath = `${downloadsDir}${sanitizeLocalFileName(item.savedFileName, item.savedFileName)}`;
+  const fallbackInfo = await FileSystem.getInfoAsync(fallbackPath);
+  if (fallbackInfo?.exists) {
+    return fallbackPath;
+  }
+
+  if (typeof item?.savedUri === 'string' && /^(content|file):\/\//i.test(item.savedUri)) {
+    return item.savedUri;
+  }
+
+  return null;
+}
+
+async function resolveOpenableUri(fileUri) {
+  if (!fileUri) {
+    return null;
+  }
+
+  if (Platform.OS === 'android' && typeof FileSystem.getContentUriAsync === 'function') {
+    try {
+      return await FileSystem.getContentUriAsync(fileUri);
+    } catch {
+      return fileUri;
+    }
+  }
+
+  return fileUri;
+}
+
 async function loadDownloadHistory() {
   const storagePath = getHistoryStoragePath();
   if (!storagePath) {
@@ -238,6 +440,30 @@ async function loadDownloadHistory() {
   } catch {
     return [];
   }
+}
+
+async function loadSavedDownloadsDirectoryUri() {
+  const storagePath = getDownloadsDirectoryUriStoragePath();
+  if (!storagePath) {
+    return null;
+  }
+
+  try {
+    const value = await FileSystem.readAsStringAsync(storagePath);
+    const normalized = String(value || '').trim();
+    return normalized || null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveDownloadsDirectoryUri(directoryUri) {
+  const storagePath = getDownloadsDirectoryUriStoragePath();
+  if (!storagePath) {
+    return;
+  }
+
+  await FileSystem.writeAsStringAsync(storagePath, String(directoryUri || '').trim());
 }
 
 async function saveDownloadHistory(downloadHistory) {
@@ -339,8 +565,38 @@ function extractYouTubeLink(value) {
     return null;
   }
 
-  const match = value.match(YOUTUBE_LINK_REGEX);
-  return match?.[1] ?? null;
+  const normalizedText = String(value).trim();
+  const directMatch = normalizedText.match(YOUTUBE_LINK_REGEX);
+  if (directMatch?.[1]) {
+    return directMatch[1];
+  }
+
+  const tokens = normalizedText.split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    const candidate = token.replace(/[)\],.;!?]+$/g, '');
+
+    try {
+      const parsed = new URL(candidate);
+      const host = parsed.hostname.toLowerCase();
+      if (host.endsWith('youtube.com') || host.endsWith('youtu.be')) {
+        return parsed.toString();
+      }
+
+      const embedded = parsed.searchParams.get('url');
+      if (embedded) {
+        const nested = extractYouTubeLink(embedded);
+        if (nested) {
+          return nested;
+        }
+      }
+    } catch {
+      if (/^(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(candidate)) {
+        return `https://${candidate}`;
+      }
+    }
+  }
+
+  return null;
 }
 
 function extractSupportedLink(value) {
@@ -368,6 +624,103 @@ function getFileExtensionFromUrl(url, fallbackExtension) {
   }
 
   return fallbackExtension;
+}
+
+function extractFilenameFromContentDisposition(contentDispositionValue) {
+  if (!contentDispositionValue || typeof contentDispositionValue !== 'string') {
+    return null;
+  }
+
+  const utf8Match = contentDispositionValue.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const asciiMatch = contentDispositionValue.match(/filename="?([^";]+)"?/i);
+  return asciiMatch?.[1] || null;
+}
+
+function extractDownloadedFileName(downloadResult, fallbackName = 'downloaded-file') {
+  const headers = downloadResult?.headers || {};
+  const contentDisposition =
+    headers['Content-Disposition'] ||
+    headers['content-disposition'] ||
+    headers['CONTENT-DISPOSITION'];
+  const fromDisposition = extractFilenameFromContentDisposition(contentDisposition);
+  if (fromDisposition) {
+    return fromDisposition;
+  }
+
+  const uri = downloadResult?.uri || '';
+  if (uri) {
+    try {
+      const pathname = new URL(uri).pathname;
+      const fromPath = pathname.split('/').pop();
+      if (fromPath) {
+        return fromPath;
+      }
+    } catch {
+      const fromPath = String(uri).split('/').pop();
+      if (fromPath) {
+        return fromPath;
+      }
+    }
+  }
+
+  return fallbackName;
+}
+
+function getHistoryItemId(item) {
+  return item?.id || `${item?.url || 'item'}_${item?.savedAt || 0}`;
+}
+
+function normalizeHistoryItem(item, index = 0) {
+  const savedAt = Number(item?.savedAt || 0) || Date.now();
+  const normalizedUrl = typeof item?.url === 'string' ? item.url : '';
+  const id = item?.id || `${normalizedUrl || 'item'}_${savedAt}_${index}`;
+
+  return {
+    ...item,
+    id,
+    url: normalizedUrl,
+    savedAt,
+    fileCount: Number(item?.fileCount || 0) || 1,
+  };
+}
+
+function mergeHistoryCollections(primary = [], secondary = []) {
+  const merged = [...(Array.isArray(primary) ? primary : []), ...(Array.isArray(secondary) ? secondary : [])]
+    .map((item, index) => normalizeHistoryItem(item, index));
+
+  if (merged.length === 0) {
+    return [];
+  }
+
+  const byId = new Map();
+  for (const item of merged) {
+    const itemId = getHistoryItemId(item);
+    const existing = byId.get(itemId);
+    if (!existing || Number(item.savedAt || 0) >= Number(existing.savedAt || 0)) {
+      byId.set(itemId, item);
+    }
+  }
+
+  return Array.from(byId.values())
+    .sort((left, right) => Number(right?.savedAt || 0) - Number(left?.savedAt || 0))
+    .slice(0, MAX_HISTORY_ITEMS);
+}
+
+function sanitizeHistoryDisplayTitle(value, fallback = 'Saved download') {
+  const normalized = String(value || fallback)
+    .replace(/[\x00-\x1F\x7F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return (normalized || fallback).slice(0, 120);
 }
 
 function extractEscapedJsonValue(text, key) {
@@ -609,6 +962,48 @@ function extractEmbedUrlsByRegex(embedHtml, key) {
   }
 
   return urls;
+}
+
+function parseResolutionHeight(value) {
+  if (!value || typeof value !== 'string') {
+    return 0;
+  }
+
+  const lowered = value.toLowerCase();
+  const match = lowered.match(/(\d{3,4})p/) || lowered.match(/x(\d{3,4})/);
+  return match?.[1] ? Number(match[1]) : 0;
+}
+
+function sortYouTubeMp4Options(options = []) {
+  return [...options].sort((left, right) => {
+    const byFps = Number(right?.fps || 0) - Number(left?.fps || 0);
+    if (byFps !== 0) {
+      return byFps;
+    }
+
+    const byResolution = parseResolutionHeight(right?.resolution) - parseResolutionHeight(left?.resolution);
+    if (byResolution !== 0) {
+      return byResolution;
+    }
+
+    const byAudio = Number(Boolean(right?.hasAudio)) - Number(Boolean(left?.hasAudio));
+    if (byAudio !== 0) {
+      return byAudio;
+    }
+
+    return Number(right?.filesize || 0) - Number(left?.filesize || 0);
+  });
+}
+
+function sortYouTubeMp3Options(options = []) {
+  return [...options].sort((left, right) => {
+    const byAbr = Number(right?.abr || 0) - Number(left?.abr || 0);
+    if (byAbr !== 0) {
+      return byAbr;
+    }
+
+    return Number(right?.filesize || 0) - Number(left?.filesize || 0);
+  });
 }
 
 function extractGraphVideoUrls(payload) {
@@ -928,10 +1323,19 @@ async function resolveInstagramMediaInfos(instagramLink) {
 export default function App() {
   const [manualLink, setManualLink] = useState('');
   const [youtubeOptions, setYoutubeOptions] = useState(null);
+  const [isCheckingYouTubeOptions, setIsCheckingYouTubeOptions] = useState(false);
+  const [youtubeOptionsError, setYoutubeOptionsError] = useState('');
   const [selectedYouTubeFormat, setSelectedYouTubeFormat] = useState('mp4');
+  const [selectedYouTubeMp4FormatId, setSelectedYouTubeMp4FormatId] = useState('');
+  const [selectedYouTubeMp3FormatId, setSelectedYouTubeMp3FormatId] = useState('');
   const [autoDetectClipboard, setAutoDetectClipboard] = useState(true);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [displayProgress, setDisplayProgress] = useState(0);
+  const [downloadProgressLabel, setDownloadProgressLabel] = useState('');
   const [downloadHistory, setDownloadHistory] = useState([]);
+  const [isRecentSelectionMode, setIsRecentSelectionMode] = useState(false);
+  const [selectedRecentUrls, setSelectedRecentUrls] = useState({});
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState('download');
   const [thumbnailFailures, setThumbnailFailures] = useState({});
@@ -940,15 +1344,28 @@ export default function App() {
   const contentAnim = useRef(new Animated.Value(1)).current;
   const noticeAnim = useRef(new Animated.Value(0)).current;
   const noticeTimerRef = useRef(null);
+  const resetProgressTimerRef = useRef(null);
+  const androidDownloadsDirectoryUriRef = useRef(null);
+  const androidMediaSubfolderUriRef = useRef({});
   const instagramLink = extractInstagramLink(manualLink);
   const youtubeLink = extractYouTubeLink(manualLink);
   const sourceType = instagramLink ? 'instagram' : (youtubeLink ? 'youtube' : 'unknown');
   const hasLink = sourceType !== 'unknown';
   const activeLink = sourceType === 'youtube' ? youtubeLink : instagramLink;
-  const recentDownloads = downloadHistory.slice(0, 6);
+  const isPotentialYouTubeInput = /(?:youtu\.be|youtube\.com|youtube)/i.test(manualLink);
+  const recentDownloads = downloadHistory.slice(0, MAX_HISTORY_ITEMS);
   const favoriteDownloads = downloadHistory.filter((item) => item.favorite);
   const isYouTubeActive = sourceType === 'youtube';
+  const showYouTubePanel = isYouTubeActive || isPotentialYouTubeInput;
   const sourceLabel = isYouTubeActive ? 'YouTube' : 'Instagram';
+  const sortedMp4Options = sortYouTubeMp4Options(youtubeOptions?.mp4Options || []).filter((item) => parseResolutionHeight(item?.resolution) >= 720);
+  const sortedMp3Options = sortYouTubeMp3Options(youtubeOptions?.mp3Options || []);
+  const selectedYouTubeFormatOptions = selectedYouTubeFormat === 'mp4' ? sortedMp4Options : sortedMp3Options;
+  const selectedYouTubeFormatId = selectedYouTubeFormat === 'mp4'
+    ? selectedYouTubeMp4FormatId
+    : (selectedYouTubeMp3FormatId || sortedMp3Options[0]?.formatId || '');
+  const maxAvailableFps = sortedMp4Options.reduce((highest, item) => Math.max(highest, Number(item?.fps || 0)), 0);
+  const maxAvailableMp3Abr = sortedMp3Options.reduce((highest, item) => Math.max(highest, Number(item?.abr || 0)), 0);
   const tabs = [
     { id: 'recent', label: 'Recent', icon: 'time-outline', activeIcon: 'time' },
     { id: 'download', label: 'Download', icon: 'paper-plane-outline', activeIcon: 'paper-plane' },
@@ -966,17 +1383,299 @@ export default function App() {
   }, [activeTab, contentAnim]);
 
   useEffect(() => {
-    if (!isYouTubeActive) {
+    let frameId = null;
+
+    const animateProgress = () => {
+      setDisplayProgress((current) => {
+        let target = isDownloading ? Math.min(downloadProgress, 0.97) : downloadProgress;
+
+        if (isDownloading && target < 0.08) {
+          // Keep progress visually alive when byte callbacks are sparse.
+          target = Math.max(target, Math.min(0.35, current + 0.004));
+        } else if (isDownloading && target < 0.9) {
+          target = Math.max(target, Math.min(0.9, current + 0.0025));
+        }
+
+        const delta = target - current;
+        if (Math.abs(delta) < 0.002) {
+          return target;
+        }
+        return current + delta * 0.2;
+      });
+
+      frameId = requestAnimationFrame(animateProgress);
+    };
+
+    animateProgress();
+
+    return () => {
+      if (frameId) {
+        cancelAnimationFrame(frameId);
+      }
+    };
+  }, [downloadProgress, isDownloading]);
+
+  const resetDownloadProgress = useCallback((delayMs = 0) => {
+    if (resetProgressTimerRef.current) {
+      clearTimeout(resetProgressTimerRef.current);
+      resetProgressTimerRef.current = null;
+    }
+
+    const runReset = () => {
+      setDownloadProgress(0);
+      setDisplayProgress(0);
+      setDownloadProgressLabel('');
+      resetProgressTimerRef.current = null;
+    };
+
+    if (delayMs > 0) {
+      resetProgressTimerRef.current = setTimeout(runReset, delayMs);
+      return;
+    }
+
+    runReset();
+  }, []);
+
+  const runDownloadWithProgress = useCallback(async (sourceUrl, targetPath, requestOptions, onProgress) => {
+    if (typeof FileSystem.createDownloadResumable === 'function') {
+      const resumable = FileSystem.createDownloadResumable(
+        sourceUrl,
+        targetPath,
+        requestOptions,
+        (progressEvent) => {
+          const expected = Number(progressEvent?.totalBytesExpectedToWrite || 0);
+          const written = Number(progressEvent?.totalBytesWritten || 0);
+          if (expected > 0 && typeof onProgress === 'function') {
+            onProgress(Math.max(0, Math.min(1, written / expected)));
+          }
+        }
+      );
+
+      return resumable.downloadAsync();
+    }
+
+    return FileSystem.downloadAsync(sourceUrl, targetPath, requestOptions);
+  }, []);
+
+  const ensureMediaLibraryPermission = useCallback(async () => {
+    if (MediaLibrary.isAvailableAsync && !(await MediaLibrary.isAvailableAsync())) {
+      return false;
+    }
+
+    if (typeof MediaLibrary.requestPermissionsAsync === 'function') {
+      try {
+        const granularPermissions = isRunningInExpoGo()
+          ? ['photo', 'video']
+          : ['photo', 'video', 'audio'];
+        const permission = await MediaLibrary.requestPermissionsAsync(false, granularPermissions);
+        return Boolean(permission?.granted);
+      } catch (error) {
+        console.log('Media permission request fallback:', error?.message || error);
+        try {
+          const permission = await MediaLibrary.requestPermissionsAsync();
+          return Boolean(permission?.granted);
+        } catch (fallbackError) {
+          // Keep download flow alive with local-only save when permission API is unavailable.
+          console.log('Media permission request skipped:', fallbackError?.message || fallbackError);
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }, []);
+
+  const saveToMediaLibraryAndResolveUri = useCallback(async (fileUri) => {
+    try {
+      const asset = await MediaLibrary.createAssetAsync(fileUri);
+      if (Platform.OS === 'android' && asset) {
+        try {
+          await MediaLibrary.createAlbumAsync('InstaSave', asset, false);
+        } catch {
+          // Album may already exist; ignore.
+        }
+      }
+
+      return {
+        savedToLibrary: true,
+        libraryUri: asset?.uri || fileUri,
+      };
+    } catch (assetError) {
+      console.log('createAssetAsync fallback:', assetError?.message || assetError);
+      try {
+        await MediaLibrary.saveToLibraryAsync(fileUri);
+        return {
+          savedToLibrary: true,
+          libraryUri: fileUri,
+        };
+      } catch (libraryError) {
+        console.log('saveToLibraryAsync fallback:', libraryError?.message || libraryError);
+        return {
+          savedToLibrary: false,
+          libraryUri: fileUri,
+        };
+      }
+    }
+  }, []);
+
+  const saveFileToPhoneDownloads = useCallback(async (sourceUri, preferredFileName, kind = '') => {
+    const safeName = sanitizeLocalFileName(preferredFileName, `instasave_${Date.now()}`);
+
+    if (Platform.OS !== 'android' || !FileSystem.StorageAccessFramework) {
+      return saveFileToLocalDownloads(sourceUri, safeName);
+    }
+
+    const saf = FileSystem.StorageAccessFramework;
+    const mimeType = guessMimeTypeFromFileName(safeName, kind);
+
+    const pickDirectoryManually = async () => {
+      const manualPermission = await saf.requestDirectoryPermissionsAsync();
+      if (!manualPermission?.granted || !manualPermission?.directoryUri) {
+        throw new Error('Folder selection was cancelled.');
+      }
+
+      androidDownloadsDirectoryUriRef.current = manualPermission.directoryUri;
+      androidMediaSubfolderUriRef.current = {};
+      await saveDownloadsDirectoryUri(manualPermission.directoryUri);
+      return manualPermission.directoryUri;
+    };
+
+    let directoryUri = androidDownloadsDirectoryUriRef.current;
+    if (!directoryUri || !isInstaSaveDirectoryUri(directoryUri)) {
+      try {
+        const initialDownloadsTreeUri = 'content://com.android.externalstorage.documents/tree/primary%3ADownload';
+        let downloadsRootUri = null;
+
+        if (directoryUri && !isInstaSaveDirectoryUri(directoryUri)) {
+          downloadsRootUri = directoryUri;
+        } else {
+          const permission = await saf.requestDirectoryPermissionsAsync(initialDownloadsTreeUri);
+          if (!permission?.granted || !permission?.directoryUri) {
+            throw new Error('Downloads folder permission was not granted.');
+          }
+
+          downloadsRootUri = permission.directoryUri;
+        }
+
+        const existingEntries = await saf.readDirectoryAsync(downloadsRootUri);
+        const existingFolderUri = existingEntries.find((entryUri) => isInstaSaveDirectoryUri(entryUri));
+        if (existingFolderUri) {
+          directoryUri = existingFolderUri;
+        } else {
+          directoryUri = await saf.makeDirectoryAsync(downloadsRootUri, PHONE_DOWNLOADS_SUBFOLDER);
+        }
+
+        androidDownloadsDirectoryUriRef.current = directoryUri;
+        androidMediaSubfolderUriRef.current = {};
+        await saveDownloadsDirectoryUri(directoryUri);
+      } catch (autoDirectoryError) {
+        console.log('Automatic InstaSave folder setup failed:', autoDirectoryError?.message || autoDirectoryError);
+        directoryUri = await pickDirectoryManually();
+      }
+    }
+
+    const subfolderName = getMediaSubfolderName(kind, safeName);
+    let targetDirectoryUri = androidMediaSubfolderUriRef.current[subfolderName];
+    if (!targetDirectoryUri) {
+      const existingEntries = await saf.readDirectoryAsync(directoryUri);
+      const existingSubfolderUri = existingEntries.find((entryUri) => isDirectoryUriWithName(entryUri, subfolderName));
+
+      if (existingSubfolderUri) {
+        targetDirectoryUri = existingSubfolderUri;
+      } else {
+        targetDirectoryUri = await saf.makeDirectoryAsync(directoryUri, subfolderName);
+      }
+
+      androidMediaSubfolderUriRef.current = {
+        ...androidMediaSubfolderUriRef.current,
+        [subfolderName]: targetDirectoryUri,
+      };
+    }
+
+    let destinationUri;
+    try {
+      destinationUri = await saf.createFileAsync(targetDirectoryUri, safeName, mimeType);
+    } catch (createError) {
+      console.log('Primary file create failed:', createError?.message || createError);
+      try {
+        destinationUri = await saf.createFileAsync(targetDirectoryUri, `${Date.now()}_${safeName}`, mimeType);
+      } catch {
+        directoryUri = await pickDirectoryManually();
+        const manualSubfolderName = getMediaSubfolderName(kind, safeName);
+        const manualEntries = await saf.readDirectoryAsync(directoryUri);
+        const manualSubfolderUri = manualEntries.find((entryUri) => isDirectoryUriWithName(entryUri, manualSubfolderName))
+          || await saf.makeDirectoryAsync(directoryUri, manualSubfolderName);
+
+        androidMediaSubfolderUriRef.current = {
+          ...androidMediaSubfolderUriRef.current,
+          [manualSubfolderName]: manualSubfolderUri,
+        };
+
+        destinationUri = await saf.createFileAsync(manualSubfolderUri, safeName, mimeType);
+      }
+    }
+
+    const fileBase64 = await FileSystem.readAsStringAsync(sourceUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    await FileSystem.writeAsStringAsync(destinationUri, fileBase64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    return destinationUri;
+  }, []);
+
+  useEffect(() => {
+    if (!showYouTubePanel) {
       setYoutubeOptions(null);
       setSelectedYouTubeFormat('mp4');
+      setIsCheckingYouTubeOptions(false);
+      setYoutubeOptionsError('');
+      setSelectedYouTubeMp4FormatId('');
+      setSelectedYouTubeMp3FormatId('');
     }
-  }, [isYouTubeActive]);
+  }, [showYouTubePanel]);
+
+  useEffect(() => {
+    if (sortedMp4Options.length > 0 && !sortedMp4Options.some((item) => item?.formatId === selectedYouTubeMp4FormatId)) {
+      setSelectedYouTubeMp4FormatId(sortedMp4Options[0]?.formatId || '');
+    }
+
+    if (sortedMp3Options.length > 0 && !sortedMp3Options.some((item) => item?.formatId === selectedYouTubeMp3FormatId)) {
+      setSelectedYouTubeMp3FormatId(sortedMp3Options[0]?.formatId || '');
+    }
+  }, [sortedMp4Options, sortedMp3Options, selectedYouTubeMp4FormatId, selectedYouTubeMp3FormatId]);
 
   useEffect(() => {
     return () => {
       if (noticeTimerRef.current) {
         clearTimeout(noticeTimerRef.current);
       }
+      if (resetProgressTimerRef.current) {
+        clearTimeout(resetProgressTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !FileSystem.StorageAccessFramework) {
+      return;
+    }
+
+    let active = true;
+    loadSavedDownloadsDirectoryUri()
+      .then((savedDirectoryUri) => {
+        if (active && savedDirectoryUri) {
+          androidDownloadsDirectoryUriRef.current = savedDirectoryUri;
+        }
+      })
+      .catch(() => {
+        // Ignore cache load errors.
+      });
+
+    return () => {
+      active = false;
     };
   }, []);
 
@@ -989,7 +1688,7 @@ export default function App() {
         return;
       }
 
-      setDownloadHistory(storedHistory);
+      setDownloadHistory((currentHistory) => mergeHistoryCollections(currentHistory, storedHistory));
       setHistoryLoaded(true);
     })();
 
@@ -1007,6 +1706,29 @@ export default function App() {
       console.log('Failed to save InstaSave history:', error?.message || error);
     });
   }, [downloadHistory, historyLoaded]);
+
+  useEffect(() => {
+    if (activeTab !== 'recent') {
+      return;
+    }
+
+    let active = true;
+    loadDownloadHistory()
+      .then((storedHistory) => {
+        if (!active || !Array.isArray(storedHistory) || storedHistory.length === 0) {
+          return;
+        }
+
+        setDownloadHistory((currentHistory) => mergeHistoryCollections(currentHistory, storedHistory));
+      })
+      .catch((error) => {
+        console.log('Recent refresh failed:', error?.message || error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activeTab]);
 
   useEffect(() => {
     let active = true;
@@ -1051,76 +1773,174 @@ export default function App() {
     }
   }, [autoDetectClipboard]);
 
-  const recordDownloadHistory = useCallback((instagramLink, mediaInfos) => {
+  const recordDownloadHistory = useCallback((instagramLink, mediaInfos, saveMeta = null) => {
     const normalizedLink = normalizeInstagramPostUrl(instagramLink);
     const now = Date.now();
     const primaryKind = mediaInfos.some((item) => item.kind === 'video') ? 'video' : 'image';
-    const entry = {
-      url: normalizedLink,
-      title: buildHistoryTitle(normalizedLink, primaryKind),
-      kind: primaryKind,
-      savedAt: now,
-      favorite: false,
-      fileCount: mediaInfos.length,
-      thumbnail: mediaInfos[0]?.url || null,
-    };
-
     setDownloadHistory((currentHistory) => {
-      const existingEntry = currentHistory.find((item) => item.url === normalizedLink);
-      const mergedEntry = {
-        ...entry,
-        favorite: existingEntry?.favorite ?? false,
-        thumbnail: entry.thumbnail || existingEntry?.thumbnail || null,
-      };
+      const existingByUrl = currentHistory.find((item) => item.url === normalizedLink);
+      const entry = normalizeHistoryItem({
+        id: `${now}_${Math.random().toString(36).slice(2, 8)}`,
+        url: normalizedLink,
+        title: sanitizeHistoryDisplayTitle(buildHistoryTitle(normalizedLink, primaryKind)),
+        kind: primaryKind,
+        source: 'instagram',
+        savedAt: now,
+        favorite: existingByUrl?.favorite ?? false,
+        fileCount: mediaInfos.length,
+        thumbnail: mediaInfos[0]?.url || null,
+        savedUri: saveMeta?.savedUri || null,
+        localFileUri: saveMeta?.localFileUri || null,
+        savedFileName: saveMeta?.savedFileName || null,
+      });
+
       const nextHistory = [
-        mergedEntry,
-        ...currentHistory.filter((item) => item.url !== normalizedLink),
+        entry,
+        ...currentHistory,
       ];
 
       return nextHistory.slice(0, MAX_HISTORY_ITEMS);
     });
   }, []);
 
-  const recordYouTubeHistory = useCallback((youtubeUrl, format, meta = null) => {
+  const recordYouTubeHistory = useCallback((youtubeUrl, format, meta = null, formatId = '', saveMeta = null) => {
     const now = Date.now();
     const normalizedFormat = format === 'mp3' ? 'mp3' : 'mp4';
-    const entry = {
-      url: youtubeUrl,
-      title: meta?.title || `YouTube ${normalizedFormat.toUpperCase()}`,
-      kind: normalizedFormat === 'mp3' ? 'audio' : 'video',
-      source: 'youtube',
-      preferredFormat: normalizedFormat,
-      savedAt: now,
-      favorite: false,
-      fileCount: 1,
-      thumbnail: meta?.thumbnail || null,
-    };
-
     setDownloadHistory((currentHistory) => {
-      const existingEntry = currentHistory.find((item) => item.url === youtubeUrl);
-      const mergedEntry = {
-        ...entry,
-        favorite: existingEntry?.favorite ?? false,
-        thumbnail: entry.thumbnail || existingEntry?.thumbnail || null,
-      };
+      const existingByUrl = currentHistory.find((item) => item.url === youtubeUrl);
+      const entry = normalizeHistoryItem({
+        id: `${now}_${Math.random().toString(36).slice(2, 8)}`,
+        url: youtubeUrl,
+        title: sanitizeHistoryDisplayTitle(meta?.title || `YouTube ${normalizedFormat.toUpperCase()}`),
+        kind: normalizedFormat === 'mp3' ? 'audio' : 'video',
+        source: 'youtube',
+        preferredFormat: normalizedFormat,
+        preferredFormatId: formatId || null,
+        savedAt: now,
+        favorite: existingByUrl?.favorite ?? false,
+        fileCount: 1,
+        thumbnail: meta?.thumbnail || null,
+        savedUri: saveMeta?.savedUri || null,
+        localFileUri: saveMeta?.localFileUri || null,
+        savedFileName: saveMeta?.savedFileName || null,
+      });
 
       const nextHistory = [
-        mergedEntry,
-        ...currentHistory.filter((item) => item.url !== youtubeUrl),
+        entry,
+        ...currentHistory,
       ];
 
       return nextHistory.slice(0, MAX_HISTORY_ITEMS);
     });
   }, []);
 
-  const toggleFavorite = useCallback((url) => {
+  const toggleFavorite = useCallback((historyItemId) => {
     setDownloadHistory((currentHistory) =>
       currentHistory.map((item) => (
-        item.url === url
+        getHistoryItemId(item) === historyItemId
           ? { ...item, favorite: !item.favorite }
           : item
       ))
     );
+  }, []);
+
+  const toggleRecentSelection = useCallback((url) => {
+    setSelectedRecentUrls((current) => ({
+      ...current,
+      [url]: !current[url],
+    }));
+  }, []);
+
+  const selectAllRecent = useCallback(() => {
+    setSelectedRecentUrls((current) => {
+      const next = {};
+      for (const item of recentDownloads) {
+        next[getHistoryItemId(item)] = true;
+      }
+
+      const allAlreadySelected = recentDownloads.length > 0 && recentDownloads.every((item) => current[getHistoryItemId(item)]);
+      return allAlreadySelected ? {} : next;
+    });
+  }, [recentDownloads]);
+
+  const deleteSelectedRecent = useCallback(() => {
+    const selectedIds = Object.entries(selectedRecentUrls)
+      .filter(([, isSelected]) => Boolean(isSelected))
+      .map(([id]) => id);
+
+    if (selectedIds.length === 0) {
+      return;
+    }
+
+    setDownloadHistory((current) => current.filter((item) => !selectedIds.includes(getHistoryItemId(item))));
+    setSelectedRecentUrls({});
+    setIsRecentSelectionMode(false);
+  }, [selectedRecentUrls]);
+
+  const openDownloadedFile = useCallback(async (item) => {
+    const targetUri = await resolveExistingLocalFileUri(item);
+    const fallbackUri = item?.savedUri || null;
+    if (!targetUri && !fallbackUri) {
+      Alert.alert('File unavailable', 'No saved file URI found for this item. Download once again to enable direct open/share.');
+      return;
+    }
+
+    try {
+      const sourceUri = targetUri || fallbackUri;
+      const openableUri = await resolveOpenableUri(sourceUri);
+      const canOpen = await Linking.canOpenURL(openableUri);
+      if (canOpen) {
+        await Linking.openURL(openableUri);
+        return;
+      }
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(sourceUri, {
+          dialogTitle: item?.savedFileName || item?.title || 'Open downloaded media',
+          mimeType: item?.kind === 'audio' ? 'audio/mpeg' : 'video/mp4',
+          UTI: item?.kind === 'audio' ? 'public.mp3' : 'public.movie',
+        });
+        return;
+      }
+
+      throw new Error('No available app could open this URI');
+    } catch (error) {
+      console.log('Cannot open downloaded file:', error?.message || error);
+      Alert.alert('Cannot open file', 'Your device could not open this downloaded file directly. Try Share instead.');
+    }
+  }, []);
+
+  const shareDownloadedFile = useCallback(async (item) => {
+    if (!item) {
+      return;
+    }
+
+    const targetUri = await resolveExistingLocalFileUri(item);
+    const fallbackUri = item?.savedUri || null;
+    const sourceUri = targetUri || fallbackUri;
+    if (!sourceUri) {
+      Alert.alert('File unavailable', 'No local downloaded file is available to share.');
+      return;
+    }
+
+    try {
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(sourceUri, {
+          dialogTitle: item.savedFileName || item.title || 'Share downloaded media',
+          mimeType: item.kind === 'audio' ? 'audio/mpeg' : 'video/mp4',
+          UTI: item.kind === 'audio' ? 'public.mp3' : 'public.movie',
+        });
+        return;
+      }
+
+      const openableUri = await resolveOpenableUri(sourceUri);
+      await Share.share({
+        title: item.savedFileName || item.title,
+        url: openableUri,
+      });
+    } catch {
+      Alert.alert('Share unavailable', 'The system share sheet could not be opened.');
+    }
   }, []);
 
   const openShareSheet = useCallback(async () => {
@@ -1170,6 +1990,8 @@ export default function App() {
         return {
           title: data?.title || null,
           thumbnail: data?.thumbnail || null,
+          mp4Options: Array.isArray(data?.mp4_options) ? data.mp4_options : [],
+          mp3Options: Array.isArray(data?.mp3_options) ? data.mp3_options : [],
           mp4Count: Array.isArray(data?.mp4_options) ? data.mp4_options.length : 0,
           mp3Count: Array.isArray(data?.mp3_options) ? data.mp3_options.length : 0,
         };
@@ -1255,11 +2077,13 @@ export default function App() {
     setIsDownloading(true);
     try {
       const mediaInfos = await resolveInstagramMediaInfos(instagramLinkToDownload);
-      if (MediaLibrary.isAvailableAsync && !(await MediaLibrary.isAvailableAsync())) {
-        throw new Error('Media library is not available on this device.');
-      }
+      const canSaveToLibrary = await ensureMediaLibraryPermission();
 
       let savedCount = 0;
+      let firstSavedUri = null;
+      let firstSavedFileName = null;
+      let firstLocalFileUri = null;
+      const shortcode = extractShortcode(instagramLinkToDownload) || 'instagram';
       for (let index = 0; index < mediaInfos.length; index += 1) {
         const mediaInfo = mediaInfos[index];
         const targetPath = `${FileSystem.cacheDirectory}instasave_${Date.now()}_${index}${mediaInfo.extension}`;
@@ -1345,7 +2169,33 @@ export default function App() {
           }
         }
 
-        await MediaLibrary.saveToLibraryAsync(downloadResult.uri);
+        const preferredName = buildSafeSavedFileName(`instagram_${shortcode}_${index + 1}`, mediaInfo.extension || '.mp4');
+        let localFileUri = downloadResult.uri;
+        try {
+          localFileUri = await saveFileToPhoneDownloads(downloadResult.uri, preferredName, mediaInfo.kind);
+        } catch (persistError) {
+          console.log('Phone downloads save failed, trying local app storage:', persistError?.message || persistError);
+          try {
+            localFileUri = await saveFileToLocalDownloads(downloadResult.uri, preferredName);
+          } catch (localFallbackError) {
+            console.log('Local copy fallback used for Instagram item:', localFallbackError?.message || localFallbackError);
+          }
+        }
+        const mediaSaveResult = canSaveToLibrary
+          ? await saveToMediaLibraryAndResolveUri(localFileUri)
+          : { savedToLibrary: false, libraryUri: localFileUri };
+        if (!firstSavedUri) {
+          firstSavedUri = mediaSaveResult.libraryUri || localFileUri;
+        }
+        if (!firstLocalFileUri) {
+          firstLocalFileUri = localFileUri;
+        }
+        if (!firstSavedFileName) {
+          firstSavedFileName = buildSafeSavedFileName(
+            extractDownloadedFileName(downloadResult, preferredName),
+            mediaInfo.extension || '.mp4'
+          );
+        }
         savedCount += 1;
       }
 
@@ -1353,11 +2203,21 @@ export default function App() {
         throw new Error('No media files were saved.');
       }
 
-      recordDownloadHistory(instagramLinkToDownload, mediaInfos);
+      recordDownloadHistory(instagramLinkToDownload, mediaInfos, {
+        savedUri: firstSavedUri,
+        localFileUri: firstLocalFileUri,
+        savedFileName: firstSavedFileName,
+      });
       setManualLink(normalizedLinkForRequest);
       showCompletionNotice(
         'Download complete',
-        `${savedCount} media file${savedCount === 1 ? '' : 's'} saved to your gallery.`
+        canSaveToLibrary
+          ? (savedCount === 1
+            ? `${firstSavedFileName || '1 file'} saved to your gallery.`
+            : `${savedCount} media files saved to your gallery.`)
+          : (savedCount === 1
+            ? `${firstSavedFileName || '1 file'} saved locally. Gallery save may be blocked by device permission settings.`
+            : `${savedCount} media files saved locally. Gallery save may be blocked by device permission settings.`)
       );
     } catch (error) {
       const errorMessage = typeof error?.message === 'string' ? error.message : '';
@@ -1370,9 +2230,9 @@ export default function App() {
     } finally {
       setIsDownloading(false);
     }
-  }, [isDownloading, recordDownloadHistory, showCompletionNotice]);
+  }, [ensureMediaLibraryPermission, isDownloading, recordDownloadHistory, saveFileToPhoneDownloads, saveToMediaLibraryAndResolveUri, showCompletionNotice]);
 
-  const downloadYouTubeFromLink = useCallback(async (youtubeUrl, preferredFormat) => {
+  const downloadYouTubeFromLink = useCallback(async (youtubeUrl, preferredFormat, preferredFormatId = '') => {
     if (isDownloading) {
       return;
     }
@@ -1384,11 +2244,11 @@ export default function App() {
 
     const resolvedFormat = preferredFormat === 'mp3' ? 'mp3' : selectedYouTubeFormat;
     setIsDownloading(true);
+    setDownloadProgress(0);
+    setDownloadProgressLabel(`Preparing ${resolvedFormat.toUpperCase()} download...`);
 
     try {
-      if (MediaLibrary.isAvailableAsync && !(await MediaLibrary.isAvailableAsync())) {
-        throw new Error('Media library is not available on this device.');
-      }
+      const canSaveToLibrary = await ensureMediaLibraryPermission();
 
       const loadedOptions = await loadYouTubeOptions(youtubeUrl);
       setYoutubeOptions(loadedOptions);
@@ -1401,9 +2261,17 @@ export default function App() {
         throw new Error('No MP4 stream available for this YouTube video.');
       }
 
+      const bestMp4From720 = sortYouTubeMp4Options(loadedOptions?.mp4Options || []).filter((item) => parseResolutionHeight(item?.resolution) >= 720);
+      const bestMp3Only = sortYouTubeMp3Options(loadedOptions?.mp3Options || []);
+      const resolvedFormatId = preferredFormatId || (
+        resolvedFormat === 'mp4'
+          ? (selectedYouTubeMp4FormatId || bestMp4From720[0]?.formatId || '')
+          : (bestMp3Only[0]?.formatId || selectedYouTubeMp3FormatId || '')
+      );
+
       const targetPath = `${FileSystem.cacheDirectory}instasave_yt_${Date.now()}.${resolvedFormat}`;
-      const candidates = buildYouTubeDownloadUrlsForAllHosts(youtubeUrl, resolvedFormat);
-      const fallbackCandidate = buildLocalYouTubeDownloadUrl(youtubeUrl, resolvedFormat);
+      const candidates = buildYouTubeDownloadUrlsForAllHosts(youtubeUrl, resolvedFormat, resolvedFormatId);
+      const fallbackCandidate = buildLocalYouTubeDownloadUrl(youtubeUrl, resolvedFormat, resolvedFormatId);
       const candidateUrls = candidates.length > 0
         ? candidates
         : (fallbackCandidate ? [fallbackCandidate] : []);
@@ -1415,7 +2283,17 @@ export default function App() {
       let downloadResult = null;
       for (const candidateUrl of candidateUrls) {
         try {
-          downloadResult = await FileSystem.downloadAsync(candidateUrl, targetPath);
+          setDownloadProgress(0);
+          setDownloadProgressLabel(`Downloading ${resolvedFormat.toUpperCase()}...`);
+          downloadResult = await runDownloadWithProgress(
+            candidateUrl,
+            targetPath,
+            {},
+            (ratio) => {
+              setDownloadProgress(ratio);
+              setDownloadProgressLabel(`Downloading ${resolvedFormat.toUpperCase()}... ${Math.round(ratio * 100)}%`);
+            }
+          );
         } catch {
           downloadResult = null;
         }
@@ -1434,12 +2312,40 @@ export default function App() {
         throw new Error(`YouTube download blocked (status ${downloadResult.status}). Ensure proxy is running: npm run proxy`);
       }
 
-      await MediaLibrary.saveToLibraryAsync(downloadResult.uri);
-      recordYouTubeHistory(youtubeUrl, resolvedFormat, loadedOptions);
+      const youtubeTitle = loadedOptions?.title || 'youtube';
+      const preferredName = buildSafeSavedFileName(youtubeTitle || 'youtube', `.${resolvedFormat}`);
+      let localFileUri = downloadResult.uri;
+      try {
+        localFileUri = await saveFileToPhoneDownloads(downloadResult.uri, preferredName, resolvedFormat === 'mp3' ? 'audio' : 'video');
+      } catch (persistError) {
+        console.log('Phone downloads save failed, trying local app storage:', persistError?.message || persistError);
+        try {
+          localFileUri = await saveFileToLocalDownloads(downloadResult.uri, preferredName);
+        } catch (localFallbackError) {
+          console.log('Local copy fallback used for YouTube item:', localFallbackError?.message || localFallbackError);
+        }
+      }
+      const savedFileName = buildSafeSavedFileName(
+        extractDownloadedFileName(downloadResult, preferredName),
+        `.${resolvedFormat}`
+      );
+      const mediaSaveResult = canSaveToLibrary
+        ? await saveToMediaLibraryAndResolveUri(localFileUri)
+        : { savedToLibrary: false, libraryUri: localFileUri };
+      const savedUri = mediaSaveResult.libraryUri || localFileUri;
+      setDownloadProgress(1);
+      setDownloadProgressLabel('Finalizing...');
+      recordYouTubeHistory(youtubeUrl, resolvedFormat, loadedOptions, resolvedFormatId, {
+        savedUri,
+        localFileUri,
+        savedFileName,
+      });
       setManualLink(youtubeUrl);
       showCompletionNotice(
         'Download complete',
-        `YouTube ${resolvedFormat.toUpperCase()} saved to your gallery.`
+        canSaveToLibrary
+          ? `${savedFileName} saved to your gallery.`
+          : `${savedFileName} saved locally. Gallery save may be blocked by device permission settings.`
       );
     } catch (error) {
       const errorMessage = typeof error?.message === 'string' ? error.message : '';
@@ -1451,10 +2357,11 @@ export default function App() {
       );
     } finally {
       setIsDownloading(false);
+      resetDownloadProgress(900);
     }
-  }, [isDownloading, loadYouTubeOptions, recordYouTubeHistory, selectedYouTubeFormat, showCompletionNotice]);
+  }, [ensureMediaLibraryPermission, isDownloading, loadYouTubeOptions, recordYouTubeHistory, resetDownloadProgress, runDownloadWithProgress, saveFileToPhoneDownloads, saveToMediaLibraryAndResolveUri, selectedYouTubeFormat, selectedYouTubeMp3FormatId, selectedYouTubeMp4FormatId, showCompletionNotice]);
 
-  const downloadFromLink = useCallback((link, preferredFormat) => {
+  const downloadFromLink = useCallback((link, preferredFormat, preferredFormatId) => {
     const instagramCandidate = extractInstagramLink(link);
     if (instagramCandidate) {
       downloadInstagramFromLink(instagramCandidate);
@@ -1463,7 +2370,7 @@ export default function App() {
 
     const youtubeCandidate = extractYouTubeLink(link);
     if (youtubeCandidate) {
-      downloadYouTubeFromLink(youtubeCandidate, preferredFormat);
+      downloadYouTubeFromLink(youtubeCandidate, preferredFormat, preferredFormatId);
       return;
     }
 
@@ -1471,23 +2378,67 @@ export default function App() {
   }, [downloadInstagramFromLink, downloadYouTubeFromLink]);
 
   const onDownload = useCallback(() => {
-    downloadFromLink(activeLink);
-  }, [activeLink, downloadFromLink]);
+    downloadFromLink(activeLink, selectedYouTubeFormat, selectedYouTubeFormatId);
+  }, [activeLink, downloadFromLink, selectedYouTubeFormat, selectedYouTubeFormatId]);
 
   const onCheckYouTubeOptions = useCallback(async () => {
     if (!youtubeLink) {
+      setYoutubeOptionsError('Enter a full YouTube URL to load formats.');
       Alert.alert('Invalid link', 'Paste a valid YouTube link first.');
       return;
     }
 
+    setYoutubeOptionsError('');
+    setIsCheckingYouTubeOptions(true);
     try {
       const options = await loadYouTubeOptions(youtubeLink);
       setYoutubeOptions(options);
     } catch (error) {
       const message = typeof error?.message === 'string' ? error.message : 'Could not load YouTube formats.';
+      setYoutubeOptionsError(message);
       Alert.alert('Format check failed', message);
+    } finally {
+      setIsCheckingYouTubeOptions(false);
     }
   }, [loadYouTubeOptions, youtubeLink]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!youtubeLink) {
+      if (showYouTubePanel && manualLink.trim().length > 0) {
+        setYoutubeOptionsError('Enter a full YouTube URL to load formats.');
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setYoutubeOptionsError('');
+    setIsCheckingYouTubeOptions(true);
+    loadYouTubeOptions(youtubeLink)
+      .then((options) => {
+        if (!cancelled) {
+          setYoutubeOptions(options);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setYoutubeOptions(null);
+          const message = typeof error?.message === 'string' ? error.message : 'Could not load YouTube formats.';
+          setYoutubeOptionsError(message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsCheckingYouTubeOptions(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [youtubeLink, manualLink, showYouTubePanel, loadYouTubeOptions]);
 
   const onPaste = useCallback(async () => {
     const text = await Clipboard.getStringAsync();
@@ -1611,8 +2562,11 @@ export default function App() {
                 <Text style={styles.helperText}>
                   Paste a public Instagram or YouTube URL.
                 </Text>
+                <Text style={styles.helperTextSecondary}>
+                  Files are saved to app local storage first, and then to gallery when device permissions allow it.
+                </Text>
 
-                {isYouTubeActive && (
+                {showYouTubePanel && (
                   <View style={styles.youtubePanel}>
                     <Text style={styles.youtubePanelTitle}>YouTube format</Text>
                     <View style={styles.youtubeFormatRow}>
@@ -1651,14 +2605,70 @@ export default function App() {
                     </View>
 
                     <Pressable style={styles.youtubeCheckButton} onPress={onCheckYouTubeOptions}>
-                      <Text style={styles.youtubeCheckButtonText}>Check available formats</Text>
+                      <Text style={styles.youtubeCheckButtonText}>{isCheckingYouTubeOptions ? 'Checking formats...' : 'Check available formats'}</Text>
                     </Pressable>
 
+                    {isCheckingYouTubeOptions && !youtubeOptions && (
+                      <Text style={styles.youtubeInfoText}>Fetching available MP4/MP3 formats...</Text>
+                    )}
+
                     {youtubeOptions && (
-                      <Text style={styles.youtubeInfoText}>
-                        {youtubeOptions.title ? `${youtubeOptions.title} • ` : ''}
-                        {youtubeOptions.mp4Count} MP4 option{youtubeOptions.mp4Count === 1 ? '' : 's'} • {youtubeOptions.mp3Count} MP3 option{youtubeOptions.mp3Count === 1 ? '' : 's'}
-                      </Text>
+                      <View style={styles.youtubeFormatsWrap}>
+                        <Text style={styles.youtubeInfoText}>
+                          {youtubeOptions.title ? `${youtubeOptions.title} • ` : ''}
+                          {sortedMp4Options.length} MP4 option{sortedMp4Options.length === 1 ? '' : 's'} from 720p+ • Max FPS {maxAvailableFps || 'N/A'} • MP3 max {maxAvailableMp3Abr ? `${Math.round(maxAvailableMp3Abr)} kbps` : 'N/A'}
+                        </Text>
+
+                        <View style={styles.youtubeTypesGroup}>
+                          <Text style={styles.youtubeTypesHeading}>
+                            {selectedYouTubeFormat === 'mp4' ? 'MP4 types (720p to max)' : 'MP3 highest quality'}
+                          </Text>
+
+                          {selectedYouTubeFormat === 'mp4' && selectedYouTubeFormatOptions.length === 0 ? (
+                            <Text style={styles.youtubeTypeItem}>No MP4 formats found from 720p or higher.</Text>
+                          ) : (
+                            selectedYouTubeFormat === 'mp4' ? selectedYouTubeFormatOptions.map((opt, idx) => {
+                              const formatId = opt?.formatId || '';
+                              const selected = formatId === selectedYouTubeFormatId;
+                              const label = `${opt?.resolution || 'video'}${opt?.fps ? ` · ${opt.fps}fps` : ''}${opt?.hasAudio ? ' · with audio' : ' · video only'}`;
+
+                              return (
+                                <Pressable
+                                  key={`${selectedYouTubeFormat}-${formatId || idx}`}
+                                  style={[styles.youtubeTypeItemButton, selected && styles.youtubeTypeItemButtonActive]}
+                                  onPress={() => {
+                                    if (selectedYouTubeFormat === 'mp4') {
+                                      setSelectedYouTubeMp4FormatId(formatId);
+                                    } else {
+                                      setSelectedYouTubeMp3FormatId(formatId);
+                                    }
+                                  }}
+                                >
+                                  <Text style={[styles.youtubeTypeItem, selected && styles.youtubeTypeItemActive]}>{label}</Text>
+                                  <Text style={[styles.youtubeTypeMeta, selected && styles.youtubeTypeMetaActive]}>
+                                    {selected ? 'Selected' : 'Tap to select'}
+                                  </Text>
+                                </Pressable>
+                              );
+                            }) : (
+                              sortedMp3Options[0] ? (
+                                <View style={[styles.youtubeTypeItemButton, styles.youtubeTypeItemButtonActive]}>
+                                  <Text style={[styles.youtubeTypeItem, styles.youtubeTypeItemActive]}>
+                                    {sortedMp3Options[0]?.abr ? `${Math.round(sortedMp3Options[0].abr)} kbps` : 'audio'}{sortedMp3Options[0]?.asr ? ` · ${Math.round(sortedMp3Options[0].asr / 1000)} kHz` : ''}
+                                  </Text>
+                                  <Text style={[styles.youtubeTypeMeta, styles.youtubeTypeMetaActive]}>Highest quality selected automatically</Text>
+                                </View>
+                              ) : (
+                                <Text style={styles.youtubeTypeItem}>No MP3 stream found for this video.</Text>
+                              )
+                            )
+                          )}
+                        </View>
+                      </View>
+                    )}
+
+                    {!!youtubeOptionsError && (
+                      <Text style={styles.youtubeErrorText}>{youtubeOptionsError}</Text>
                     )}
                   </View>
                 )}
@@ -1674,6 +2684,15 @@ export default function App() {
                     <Text style={styles.iconButtonText}>Clear</Text>
                   </Pressable>
                 </View>
+
+                {isDownloading && sourceType === 'youtube' && !!downloadProgressLabel && (
+                  <View style={styles.progressWrap}>
+                    <Text style={styles.progressLabel}>{downloadProgressLabel}</Text>
+                    <View style={styles.progressTrack}>
+                      <View style={[styles.progressFill, { width: `${Math.max(3, Math.round(displayProgress * 100))}%` }]} />
+                    </View>
+                  </View>
+                )}
 
                 <View style={styles.secondaryActionRow}>
                   <Pressable onPress={onPaste} style={[styles.button, styles.secondaryButton]}>
@@ -1703,15 +2722,49 @@ export default function App() {
             <View style={styles.sectionCard}>
               <View style={styles.sectionHeader}>
                 <Text style={styles.sectionTitle}>Recent downloads</Text>
-                <Text style={styles.sectionCount}>{recentDownloads.length}</Text>
+                <View style={styles.recentHeaderActions}>
+                  <Text style={styles.sectionCount}>{recentDownloads.length}</Text>
+                  <Pressable
+                    onPress={() => {
+                      setIsRecentSelectionMode((current) => !current);
+                      setSelectedRecentUrls({});
+                    }}
+                    style={styles.recentHeaderButton}
+                  >
+                    <Text style={styles.recentHeaderButtonText}>{isRecentSelectionMode ? 'Done' : 'Select'}</Text>
+                  </Pressable>
+                </View>
               </View>
+
+              {isRecentSelectionMode && recentDownloads.length > 0 && (
+                <View style={styles.recentSelectionRow}>
+                  <Pressable onPress={selectAllRecent} style={styles.recentSelectionButton}>
+                    <Text style={styles.recentSelectionButtonText}>Select all</Text>
+                  </Pressable>
+                  <Pressable onPress={deleteSelectedRecent} style={[styles.recentSelectionButton, styles.recentDeleteButton]}>
+                    <Text style={[styles.recentSelectionButtonText, styles.recentDeleteButtonText]}>Delete selected</Text>
+                  </Pressable>
+                </View>
+              )}
 
               {recentDownloads.length === 0 ? (
                 <Text style={styles.emptyStateText}>Your recent downloads will appear here after the first save.</Text>
               ) : (
-                recentDownloads.map((item) => (
-                  <View key={item.url} style={styles.historyItem}>
+                recentDownloads.map((item) => {
+                  const itemId = getHistoryItemId(item);
+                  return (
+                  <View key={itemId} style={styles.historyItem}>
                     <View style={styles.historyItemContent}>
+                      {isRecentSelectionMode && (
+                        <Pressable
+                          onPress={() => toggleRecentSelection(itemId)}
+                          style={[styles.recentCheckbox, selectedRecentUrls[itemId] && styles.recentCheckboxActive]}
+                        >
+                          <Text style={[styles.recentCheckboxText, selectedRecentUrls[itemId] && styles.recentCheckboxTextActive]}>
+                            {selectedRecentUrls[itemId] ? '✓' : ''}
+                          </Text>
+                        </Pressable>
+                      )}
                       <View style={styles.historyThumbWrap}>
                         {item.thumbnail && !thumbnailFailures[item.url] ? (
                           <Image
@@ -1761,11 +2814,14 @@ export default function App() {
                     </View>
 
                     <View style={styles.historyActionRow}>
-                      <Pressable onPress={() => downloadFromLink(item.url, item.preferredFormat)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
-                        <Text style={styles.historyPrimaryButtonText}>Re-download</Text>
+                      <Pressable onPress={() => openDownloadedFile(item)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
+                        <Text style={styles.historyPrimaryButtonText}>View download</Text>
+                      </Pressable>
+                      <Pressable onPress={() => shareDownloadedFile(item)} style={[styles.historyIconButton, styles.historyShareIconButton]}>
+                        <Ionicons name="share-social-outline" size={18} color="#334155" />
                       </Pressable>
                       <Pressable
-                        onPress={() => toggleFavorite(item.url)}
+                        onPress={() => toggleFavorite(itemId)}
                         style={[styles.historyIconButton, item.favorite && styles.historyIconButtonActive]}
                       >
                         <Text style={[styles.historyIconButtonText, item.favorite && styles.historyIconButtonTextActive]}>
@@ -1774,7 +2830,7 @@ export default function App() {
                       </Pressable>
                     </View>
                   </View>
-                ))
+                );})
               )}
             </View>
           )}
@@ -1789,8 +2845,10 @@ export default function App() {
               {favoriteDownloads.length === 0 ? (
                 <Text style={styles.emptyStateText}>Tap the star on a recent download to pin it here.</Text>
               ) : (
-                favoriteDownloads.map((item) => (
-                  <View key={item.url} style={styles.favoriteItem}>
+                favoriteDownloads.map((item) => {
+                  const itemId = getHistoryItemId(item);
+                  return (
+                  <View key={itemId} style={styles.favoriteItem}>
                     <View style={styles.favoriteItemContent}>
                       <View style={styles.historyThumbWrap}>
                         {item.thumbnail && !thumbnailFailures[item.url] ? (
@@ -1834,15 +2892,15 @@ export default function App() {
                       </Pressable>
                     </View>
                     <View style={styles.favoriteActions}>
-                      <Pressable onPress={() => downloadFromLink(item.url, item.preferredFormat)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
+                      <Pressable onPress={() => downloadFromLink(item.url, item.preferredFormat, item.preferredFormatId)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
                         <Text style={styles.historyPrimaryButtonText}>Re-download</Text>
                       </Pressable>
-                      <Pressable onPress={() => toggleFavorite(item.url)} style={[styles.historyIconButton, styles.historyIconButtonActive]}>
+                      <Pressable onPress={() => toggleFavorite(itemId)} style={[styles.historyIconButton, styles.historyIconButtonActive]}>
                         <Text style={[styles.historyIconButtonText, styles.historyIconButtonTextActive]}>★</Text>
                       </Pressable>
                     </View>
                   </View>
-                ))
+                );})
               )}
             </View>
           )}
@@ -2070,6 +3128,12 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: '#64748b',
   },
+  helperTextSecondary: {
+    marginTop: 4,
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#94a3b8',
+  },
   youtubePanel: {
     marginTop: 12,
     borderWidth: 1,
@@ -2137,6 +3201,66 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: '#475569',
   },
+  youtubeFormatsWrap: {
+    marginTop: 2,
+    gap: 8,
+  },
+  youtubeTypesGroup: {
+    borderWidth: 1,
+    borderColor: '#dbe3ee',
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  youtubeTypesHeading: {
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
+    color: '#334155',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  youtubeTypeItem: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#475569',
+    fontWeight: '600',
+  },
+  youtubeTypeItemButton: {
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 8,
+    backgroundColor: '#ffffff',
+    marginTop: 4,
+  },
+  youtubeTypeItemButtonActive: {
+    borderColor: '#0f172a',
+    backgroundColor: '#f8fafc',
+  },
+  youtubeTypeItemActive: {
+    color: '#0f172a',
+    fontWeight: '800',
+  },
+  youtubeTypeMeta: {
+    marginTop: 2,
+    fontSize: 11,
+    lineHeight: 14,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  youtubeTypeMetaActive: {
+    color: '#0f172a',
+  },
+  youtubeErrorText: {
+    marginTop: 8,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#b91c1c',
+  },
   button: {
     minHeight: 44,
     paddingVertical: 11,
@@ -2163,6 +3287,28 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     fontWeight: '700',
     letterSpacing: 0.2,
+  },
+  progressWrap: {
+    marginTop: 10,
+    gap: 6,
+  },
+  progressLabel: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#334155',
+    fontWeight: '700',
+  },
+  progressTrack: {
+    width: '100%',
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: '#e2e8f0',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 999,
+    backgroundColor: '#0f172a',
   },
   iconButton: {
     minWidth: 92,
@@ -2254,6 +3400,80 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 12,
   },
+  recentHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  recentHeaderButton: {
+    minHeight: 28,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#d5deea',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recentHeaderButtonText: {
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '800',
+    color: '#334155',
+  },
+  recentSelectionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+  },
+  recentSelectionButton: {
+    flex: 1,
+    minHeight: 34,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d5deea',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  recentSelectionButtonText: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  recentDeleteButton: {
+    borderColor: '#fecaca',
+    backgroundColor: '#fef2f2',
+  },
+  recentDeleteButtonText: {
+    color: '#b91c1c',
+  },
+  recentCheckbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  recentCheckboxActive: {
+    borderColor: '#0f172a',
+    backgroundColor: '#0f172a',
+  },
+  recentCheckboxText: {
+    fontSize: 12,
+    lineHeight: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  recentCheckboxTextActive: {
+    color: '#ffffff',
+  },
   sectionTitle: {
     fontSize: 14,
     fontWeight: '800',
@@ -2336,6 +3556,20 @@ const styles = StyleSheet.create({
   },
   historyPrimaryButtonText: {
     color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  historySecondaryActionButton: {
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#d5deea',
+  },
+  historyShareIconButton: {
+    backgroundColor: '#f8fafc',
+    borderColor: '#d5deea',
+  },
+  historySecondaryActionText: {
+    color: '#334155',
     fontSize: 13,
     fontWeight: '700',
   },
