@@ -2,6 +2,7 @@
   "expo": {
     "name": "InstaSave",
     "slug": "InstaSave",
+    "scheme": "instasave",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -15,13 +16,27 @@
     "ios": {
       "supportsTablet": true
     },
+    "updates": {
+      "enabled": false,
+      "checkAutomatically": "NEVER",
+      "fallbackToCacheTimeout": 0
+    },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.jaison007.InstaSave"
     },
+    "plugins": [
+      [
+        "expo-media-library",
+        {
+          "granularPermissions": ["photo", "video"]
+        }
+      ]
+    ],
     "web": {
       "favicon": "./assets/favicon.png"
     }
