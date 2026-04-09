@@ -26,6 +26,7 @@ import {
 } from 'react-native';
 
 const INSTAGRAM_LINK_REGEX = /(https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\/[^\s]+)/i;
+const YOUTUBE_LINK_REGEX = /(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\/[^\s]+)/i;
 const INSTAGRAM_DOWNLOAD_HEADERS = {
   Accept: '*/*',
   'Accept-Language': 'en-US,en;q=0.9',
@@ -132,6 +133,29 @@ function buildLocalExtractUrl(targetUrl) {
   }
 }
 
+function buildLocalYouTubeExtractUrl(targetUrl) {
+  const host = getDevServerHost();
+  try {
+    const extractUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/extract`);
+    extractUrl.searchParams.set('url', targetUrl);
+    return extractUrl.toString();
+  } catch {
+    return null;
+  }
+}
+
+function buildLocalYouTubeDownloadUrl(targetUrl, format) {
+  const host = getDevServerHost();
+  try {
+    const downloadUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/download`);
+    downloadUrl.searchParams.set('url', targetUrl);
+    downloadUrl.searchParams.set('format', format);
+    return downloadUrl.toString();
+  } catch {
+    return null;
+  }
+}
+
 function buildProxyUrlsForAllHosts(targetUrl, referer) {
   return getDevServerHostCandidates()
     .map((host) => {
@@ -157,6 +181,35 @@ function buildFreshDownloadUrlsForAllHosts(postUrl, index = 0) {
         freshUrl.searchParams.set('postUrl', postUrl);
         freshUrl.searchParams.set('index', String(index));
         return freshUrl.toString();
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function buildYouTubeExtractUrlsForAllHosts(targetUrl) {
+  return getDevServerHostCandidates()
+    .map((host) => {
+      try {
+        const extractUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/extract`);
+        extractUrl.searchParams.set('url', targetUrl);
+        return extractUrl.toString();
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function buildYouTubeDownloadUrlsForAllHosts(targetUrl, format) {
+  return getDevServerHostCandidates()
+    .map((host) => {
+      try {
+        const downloadUrl = new URL(`http://${host}:${LOCAL_PROXY_PORT}/youtube/download`);
+        downloadUrl.searchParams.set('url', targetUrl);
+        downloadUrl.searchParams.set('format', format);
+        return downloadUrl.toString();
       } catch {
         return null;
       }
@@ -249,6 +302,29 @@ function extractIncomingInstagramLink(rawValue) {
   return null;
 }
 
+function extractIncomingSupportedLink(rawValue) {
+  if (!rawValue) {
+    return null;
+  }
+
+  const directLink = extractSupportedLink(rawValue);
+  if (directLink) {
+    return directLink;
+  }
+
+  try {
+    const parsed = new URL(rawValue);
+    const sharedLink = parsed.searchParams.get('url');
+    if (sharedLink) {
+      return extractSupportedLink(sharedLink) || sharedLink;
+    }
+  } catch {
+    // Ignore malformed incoming URLs.
+  }
+
+  return null;
+}
+
 function extractInstagramLink(value) {
   if (!value) {
     return null;
@@ -256,6 +332,19 @@ function extractInstagramLink(value) {
 
   const match = value.match(INSTAGRAM_LINK_REGEX);
   return match?.[1] ?? null;
+}
+
+function extractYouTubeLink(value) {
+  if (!value) {
+    return null;
+  }
+
+  const match = value.match(YOUTUBE_LINK_REGEX);
+  return match?.[1] ?? null;
+}
+
+function extractSupportedLink(value) {
+  return extractInstagramLink(value) || extractYouTubeLink(value);
 }
 
 function extractMetaContent(html, propertyName) {
@@ -838,6 +927,8 @@ async function resolveInstagramMediaInfos(instagramLink) {
 
 export default function App() {
   const [manualLink, setManualLink] = useState('');
+  const [youtubeOptions, setYoutubeOptions] = useState(null);
+  const [selectedYouTubeFormat, setSelectedYouTubeFormat] = useState('mp4');
   const [autoDetectClipboard, setAutoDetectClipboard] = useState(true);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadHistory, setDownloadHistory] = useState([]);
@@ -849,9 +940,15 @@ export default function App() {
   const contentAnim = useRef(new Animated.Value(1)).current;
   const noticeAnim = useRef(new Animated.Value(0)).current;
   const noticeTimerRef = useRef(null);
-  const hasLink = manualLink.trim().length > 0;
+  const instagramLink = extractInstagramLink(manualLink);
+  const youtubeLink = extractYouTubeLink(manualLink);
+  const sourceType = instagramLink ? 'instagram' : (youtubeLink ? 'youtube' : 'unknown');
+  const hasLink = sourceType !== 'unknown';
+  const activeLink = sourceType === 'youtube' ? youtubeLink : instagramLink;
   const recentDownloads = downloadHistory.slice(0, 6);
   const favoriteDownloads = downloadHistory.filter((item) => item.favorite);
+  const isYouTubeActive = sourceType === 'youtube';
+  const sourceLabel = isYouTubeActive ? 'YouTube' : 'Instagram';
   const tabs = [
     { id: 'recent', label: 'Recent', icon: 'time-outline', activeIcon: 'time' },
     { id: 'download', label: 'Download', icon: 'paper-plane-outline', activeIcon: 'paper-plane' },
@@ -867,6 +964,13 @@ export default function App() {
       useNativeDriver: true,
     }).start();
   }, [activeTab, contentAnim]);
+
+  useEffect(() => {
+    if (!isYouTubeActive) {
+      setYoutubeOptions(null);
+      setSelectedYouTubeFormat('mp4');
+    }
+  }, [isYouTubeActive]);
 
   useEffect(() => {
     return () => {
@@ -908,9 +1012,9 @@ export default function App() {
     let active = true;
 
     const applyIncomingUrl = (incomingUrl) => {
-      const instagramLink = extractIncomingInstagramLink(incomingUrl);
-      if (instagramLink && active) {
-        setManualLink(instagramLink);
+      const incomingLink = extractIncomingSupportedLink(incomingUrl);
+      if (incomingLink && active) {
+        setManualLink(incomingLink);
       }
     };
 
@@ -941,9 +1045,9 @@ export default function App() {
     }
 
     lastClipboardValueRef.current = clipboardText;
-    const instagramLink = extractInstagramLink(clipboardText);
-    if (instagramLink) {
-      setManualLink(instagramLink);
+    const supportedLink = extractSupportedLink(clipboardText);
+    if (supportedLink) {
+      setManualLink(supportedLink);
     }
   }, [autoDetectClipboard]);
 
@@ -977,6 +1081,38 @@ export default function App() {
     });
   }, []);
 
+  const recordYouTubeHistory = useCallback((youtubeUrl, format, meta = null) => {
+    const now = Date.now();
+    const normalizedFormat = format === 'mp3' ? 'mp3' : 'mp4';
+    const entry = {
+      url: youtubeUrl,
+      title: meta?.title || `YouTube ${normalizedFormat.toUpperCase()}`,
+      kind: normalizedFormat === 'mp3' ? 'audio' : 'video',
+      source: 'youtube',
+      preferredFormat: normalizedFormat,
+      savedAt: now,
+      favorite: false,
+      fileCount: 1,
+      thumbnail: meta?.thumbnail || null,
+    };
+
+    setDownloadHistory((currentHistory) => {
+      const existingEntry = currentHistory.find((item) => item.url === youtubeUrl);
+      const mergedEntry = {
+        ...entry,
+        favorite: existingEntry?.favorite ?? false,
+        thumbnail: entry.thumbnail || existingEntry?.thumbnail || null,
+      };
+
+      const nextHistory = [
+        mergedEntry,
+        ...currentHistory.filter((item) => item.url !== youtubeUrl),
+      ];
+
+      return nextHistory.slice(0, MAX_HISTORY_ITEMS);
+    });
+  }, []);
+
   const toggleFavorite = useCallback((url) => {
     setDownloadHistory((currentHistory) =>
       currentHistory.map((item) => (
@@ -988,22 +1124,62 @@ export default function App() {
   }, []);
 
   const openShareSheet = useCallback(async () => {
-    const instagramLink = extractInstagramLink(manualLink);
-    if (!instagramLink) {
-      Alert.alert('Invalid link', 'Paste a valid Instagram link before sharing.');
+    const supportedLink = extractSupportedLink(manualLink);
+    if (!supportedLink) {
+      Alert.alert('Invalid link', 'Paste a valid Instagram or YouTube link before sharing.');
       return;
     }
 
     try {
       await Share.share({
-        message: instagramLink,
-        url: instagramLink,
-        title: 'Instagram link',
+        message: supportedLink,
+        url: supportedLink,
+        title: 'Media link',
       });
     } catch {
       Alert.alert('Share unavailable', 'The system share sheet could not be opened.');
     }
   }, [manualLink]);
+
+  const loadYouTubeOptions = useCallback(async (youtubeUrl) => {
+    const candidates = buildYouTubeExtractUrlsForAllHosts(youtubeUrl);
+    const fallbackCandidate = buildLocalYouTubeExtractUrl(youtubeUrl);
+    const candidateUrls = candidates.length > 0
+      ? candidates
+      : (fallbackCandidate ? [fallbackCandidate] : []);
+
+    if (candidateUrls.length === 0) {
+      throw new Error('Could not build local YouTube extraction URL. Start Expo in LAN mode.');
+    }
+
+    let lastError = null;
+    for (const candidateUrl of candidateUrls) {
+      try {
+        const response = await fetch(candidateUrl, {
+          headers: {
+            Accept: 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || `Extraction failed with status ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+          title: data?.title || null,
+          thumbnail: data?.thumbnail || null,
+          mp4Count: Array.isArray(data?.mp4_options) ? data.mp4_options.length : 0,
+          mp3Count: Array.isArray(data?.mp3_options) ? data.mp3_options.length : 0,
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error('YouTube extraction failed.');
+  }, []);
 
   const showCompletionNotice = useCallback((title, message) => {
     if (noticeTimerRef.current) {
@@ -1064,21 +1240,21 @@ export default function App() {
     };
   }, [checkClipboard]);
 
-  const downloadFromLink = useCallback(async (instagramLink) => {
+  const downloadInstagramFromLink = useCallback(async (instagramLinkToDownload) => {
     if (isDownloading) {
       return;
     }
 
-    if (!instagramLink) {
+    if (!instagramLinkToDownload) {
       Alert.alert('Invalid link', 'Paste a valid Instagram link to continue.');
       return;
     }
 
-    const normalizedLinkForRequest = normalizeInstagramPostUrl(instagramLink);
+    const normalizedLinkForRequest = normalizeInstagramPostUrl(instagramLinkToDownload);
 
     setIsDownloading(true);
     try {
-      const mediaInfos = await resolveInstagramMediaInfos(instagramLink);
+      const mediaInfos = await resolveInstagramMediaInfos(instagramLinkToDownload);
       if (MediaLibrary.isAvailableAsync && !(await MediaLibrary.isAvailableAsync())) {
         throw new Error('Media library is not available on this device.');
       }
@@ -1177,7 +1353,7 @@ export default function App() {
         throw new Error('No media files were saved.');
       }
 
-      recordDownloadHistory(instagramLink, mediaInfos);
+      recordDownloadHistory(instagramLinkToDownload, mediaInfos);
       setManualLink(normalizedLinkForRequest);
       showCompletionNotice(
         'Download complete',
@@ -1196,10 +1372,122 @@ export default function App() {
     }
   }, [isDownloading, recordDownloadHistory, showCompletionNotice]);
 
+  const downloadYouTubeFromLink = useCallback(async (youtubeUrl, preferredFormat) => {
+    if (isDownloading) {
+      return;
+    }
+
+    if (!youtubeUrl) {
+      Alert.alert('Invalid link', 'Paste a valid YouTube link to continue.');
+      return;
+    }
+
+    const resolvedFormat = preferredFormat === 'mp3' ? 'mp3' : selectedYouTubeFormat;
+    setIsDownloading(true);
+
+    try {
+      if (MediaLibrary.isAvailableAsync && !(await MediaLibrary.isAvailableAsync())) {
+        throw new Error('Media library is not available on this device.');
+      }
+
+      const loadedOptions = await loadYouTubeOptions(youtubeUrl);
+      setYoutubeOptions(loadedOptions);
+
+      if (resolvedFormat === 'mp3' && loadedOptions.mp3Count === 0) {
+        throw new Error('No MP3 stream available for this YouTube video.');
+      }
+
+      if (resolvedFormat === 'mp4' && loadedOptions.mp4Count === 0) {
+        throw new Error('No MP4 stream available for this YouTube video.');
+      }
+
+      const targetPath = `${FileSystem.cacheDirectory}instasave_yt_${Date.now()}.${resolvedFormat}`;
+      const candidates = buildYouTubeDownloadUrlsForAllHosts(youtubeUrl, resolvedFormat);
+      const fallbackCandidate = buildLocalYouTubeDownloadUrl(youtubeUrl, resolvedFormat);
+      const candidateUrls = candidates.length > 0
+        ? candidates
+        : (fallbackCandidate ? [fallbackCandidate] : []);
+
+      if (candidateUrls.length === 0) {
+        throw new Error('Could not build local YouTube download URL.');
+      }
+
+      let downloadResult = null;
+      for (const candidateUrl of candidateUrls) {
+        try {
+          downloadResult = await FileSystem.downloadAsync(candidateUrl, targetPath);
+        } catch {
+          downloadResult = null;
+        }
+
+        const status = typeof downloadResult?.status === 'number' ? downloadResult.status : null;
+        if (downloadResult && (status === null || status < 400)) {
+          break;
+        }
+      }
+
+      if (!downloadResult) {
+        throw new Error('YouTube download failed. Ensure local proxy is running: npm run proxy');
+      }
+
+      if (typeof downloadResult.status === 'number' && downloadResult.status >= 400) {
+        throw new Error(`YouTube download blocked (status ${downloadResult.status}). Ensure proxy is running: npm run proxy`);
+      }
+
+      await MediaLibrary.saveToLibraryAsync(downloadResult.uri);
+      recordYouTubeHistory(youtubeUrl, resolvedFormat, loadedOptions);
+      setManualLink(youtubeUrl);
+      showCompletionNotice(
+        'Download complete',
+        `YouTube ${resolvedFormat.toUpperCase()} saved to your gallery.`
+      );
+    } catch (error) {
+      const errorMessage = typeof error?.message === 'string' ? error.message : '';
+      Alert.alert(
+        'Download failed',
+        errorMessage
+          ? `${errorMessage} Try another YouTube link or check proxy logs.`
+          : 'Unable to download this YouTube video right now. Try again shortly.'
+      );
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [isDownloading, loadYouTubeOptions, recordYouTubeHistory, selectedYouTubeFormat, showCompletionNotice]);
+
+  const downloadFromLink = useCallback((link, preferredFormat) => {
+    const instagramCandidate = extractInstagramLink(link);
+    if (instagramCandidate) {
+      downloadInstagramFromLink(instagramCandidate);
+      return;
+    }
+
+    const youtubeCandidate = extractYouTubeLink(link);
+    if (youtubeCandidate) {
+      downloadYouTubeFromLink(youtubeCandidate, preferredFormat);
+      return;
+    }
+
+    Alert.alert('Invalid link', 'Paste a valid Instagram or YouTube link to continue.');
+  }, [downloadInstagramFromLink, downloadYouTubeFromLink]);
+
   const onDownload = useCallback(() => {
-    const instagramLink = extractInstagramLink(manualLink);
-    downloadFromLink(instagramLink);
-  }, [downloadFromLink, manualLink]);
+    downloadFromLink(activeLink);
+  }, [activeLink, downloadFromLink]);
+
+  const onCheckYouTubeOptions = useCallback(async () => {
+    if (!youtubeLink) {
+      Alert.alert('Invalid link', 'Paste a valid YouTube link first.');
+      return;
+    }
+
+    try {
+      const options = await loadYouTubeOptions(youtubeLink);
+      setYoutubeOptions(options);
+    } catch (error) {
+      const message = typeof error?.message === 'string' ? error.message : 'Could not load YouTube formats.';
+      Alert.alert('Format check failed', message);
+    }
+  }, [loadYouTubeOptions, youtubeLink]);
 
   const onPaste = useCallback(async () => {
     const text = await Clipboard.getStringAsync();
@@ -1207,13 +1495,13 @@ export default function App() {
       return;
     }
 
-    const instagramLink = extractInstagramLink(text);
-    if (!instagramLink) {
-      Alert.alert('No Instagram link found', 'Your clipboard does not contain an Instagram URL.');
+    const supportedLink = extractSupportedLink(text);
+    if (!supportedLink) {
+      Alert.alert('No supported link found', 'Your clipboard does not contain an Instagram or YouTube URL.');
       return;
     }
 
-    setManualLink(instagramLink);
+    setManualLink(supportedLink);
   }, []);
 
   const clearLink = useCallback(() => {
@@ -1302,14 +1590,14 @@ export default function App() {
 
               <View style={styles.card}>
                 <View style={styles.cardHeader}>
-                  <Text style={styles.label}>Instagram URL</Text>
+                  <Text style={styles.label}>{sourceLabel} URL</Text>
                   <Text style={styles.cardHint}>{hasLink ? 'Link ready' : 'Paste a link'}</Text>
                 </View>
 
                 <TextInput
                   value={manualLink}
                   onChangeText={setManualLink}
-                  placeholder="https://www.instagram.com/reel/..."
+                  placeholder="https://www.instagram.com/reel/... or https://youtu.be/..."
                   placeholderTextColor="#94a3b8"
                   autoCapitalize="none"
                   autoCorrect={false}
@@ -1321,8 +1609,59 @@ export default function App() {
                 />
 
                 <Text style={styles.helperText}>
-                  Paste a public Instagram post or reel URL.
+                  Paste a public Instagram or YouTube URL.
                 </Text>
+
+                {isYouTubeActive && (
+                  <View style={styles.youtubePanel}>
+                    <Text style={styles.youtubePanelTitle}>YouTube format</Text>
+                    <View style={styles.youtubeFormatRow}>
+                      <Pressable
+                        style={[
+                          styles.youtubeFormatChip,
+                          selectedYouTubeFormat === 'mp4' && styles.youtubeFormatChipActive,
+                        ]}
+                        onPress={() => setSelectedYouTubeFormat('mp4')}
+                      >
+                        <Text
+                          style={[
+                            styles.youtubeFormatChipText,
+                            selectedYouTubeFormat === 'mp4' && styles.youtubeFormatChipTextActive,
+                          ]}
+                        >
+                          MP4 Video
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.youtubeFormatChip,
+                          selectedYouTubeFormat === 'mp3' && styles.youtubeFormatChipActive,
+                        ]}
+                        onPress={() => setSelectedYouTubeFormat('mp3')}
+                      >
+                        <Text
+                          style={[
+                            styles.youtubeFormatChipText,
+                            selectedYouTubeFormat === 'mp3' && styles.youtubeFormatChipTextActive,
+                          ]}
+                        >
+                          MP3 Audio
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    <Pressable style={styles.youtubeCheckButton} onPress={onCheckYouTubeOptions}>
+                      <Text style={styles.youtubeCheckButtonText}>Check available formats</Text>
+                    </Pressable>
+
+                    {youtubeOptions && (
+                      <Text style={styles.youtubeInfoText}>
+                        {youtubeOptions.title ? `${youtubeOptions.title} • ` : ''}
+                        {youtubeOptions.mp4Count} MP4 option{youtubeOptions.mp4Count === 1 ? '' : 's'} • {youtubeOptions.mp3Count} MP3 option{youtubeOptions.mp3Count === 1 ? '' : 's'}
+                      </Text>
+                    )}
+                  </View>
+                )}
 
                 <View style={styles.primaryActionRow}>
                   <Pressable
@@ -1389,18 +1728,22 @@ export default function App() {
                         ) : (
                           <View style={[
                             styles.historyThumbPlaceholder,
-                            item.kind === 'video' ? styles.historyThumbPlaceholderVideo : styles.historyThumbPlaceholderImage,
+                            item.kind === 'video' || item.kind === 'audio'
+                              ? styles.historyThumbPlaceholderVideo
+                              : styles.historyThumbPlaceholderImage,
                           ]}>
                             <Ionicons
-                              name={item.kind === 'video' ? 'play' : 'image-outline'}
+                              name={item.kind === 'video' ? 'play' : (item.kind === 'audio' ? 'musical-notes' : 'image-outline')}
                               size={28}
-                              color={item.kind === 'video' ? '#ffffff' : '#0f172a'}
+                              color={item.kind === 'video' || item.kind === 'audio' ? '#ffffff' : '#0f172a'}
                             />
                             <Text style={[
                               styles.historyThumbFallbackText,
-                              item.kind === 'video' ? styles.historyThumbFallbackTextVideo : styles.historyThumbFallbackTextImage,
+                              item.kind === 'video' || item.kind === 'audio'
+                                ? styles.historyThumbFallbackTextVideo
+                                : styles.historyThumbFallbackTextImage,
                             ]}>
-                              {item.kind === 'video' ? 'Video' : 'Image'}
+                              {item.kind === 'video' ? 'Video' : (item.kind === 'audio' ? 'Audio' : 'Image')}
                             </Text>
                           </View>
                         )}
@@ -1408,7 +1751,7 @@ export default function App() {
                       <Pressable onPress={() => setManualLink(item.url)} style={styles.historyItemMain}>
                         <View style={styles.historyItemTopRow}>
                           <Text style={styles.historyItemTitle} numberOfLines={1}>{item.title}</Text>
-                          <Text style={styles.historyItemBadge}>{item.kind === 'video' ? 'Video' : 'Image'}</Text>
+                          <Text style={styles.historyItemBadge}>{item.kind === 'video' ? 'Video' : (item.kind === 'audio' ? 'Audio' : 'Image')}</Text>
                         </View>
                         <Text style={styles.historyItemUrl} numberOfLines={1}>{item.url}</Text>
                         <Text style={styles.historyItemMeta}>
@@ -1418,7 +1761,7 @@ export default function App() {
                     </View>
 
                     <View style={styles.historyActionRow}>
-                      <Pressable onPress={() => downloadFromLink(item.url)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
+                      <Pressable onPress={() => downloadFromLink(item.url, item.preferredFormat)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
                         <Text style={styles.historyPrimaryButtonText}>Re-download</Text>
                       </Pressable>
                       <Pressable
@@ -1465,18 +1808,22 @@ export default function App() {
                         ) : (
                           <View style={[
                             styles.historyThumbPlaceholder,
-                            item.kind === 'video' ? styles.historyThumbPlaceholderVideo : styles.historyThumbPlaceholderImage,
+                            item.kind === 'video' || item.kind === 'audio'
+                              ? styles.historyThumbPlaceholderVideo
+                              : styles.historyThumbPlaceholderImage,
                           ]}>
                             <Ionicons
-                              name={item.kind === 'video' ? 'play' : 'image-outline'}
+                              name={item.kind === 'video' ? 'play' : (item.kind === 'audio' ? 'musical-notes' : 'image-outline')}
                               size={28}
-                              color={item.kind === 'video' ? '#ffffff' : '#0f172a'}
+                              color={item.kind === 'video' || item.kind === 'audio' ? '#ffffff' : '#0f172a'}
                             />
                             <Text style={[
                               styles.historyThumbFallbackText,
-                              item.kind === 'video' ? styles.historyThumbFallbackTextVideo : styles.historyThumbFallbackTextImage,
+                              item.kind === 'video' || item.kind === 'audio'
+                                ? styles.historyThumbFallbackTextVideo
+                                : styles.historyThumbFallbackTextImage,
                             ]}>
-                              {item.kind === 'video' ? 'Video' : 'Image'}
+                              {item.kind === 'video' ? 'Video' : (item.kind === 'audio' ? 'Audio' : 'Image')}
                             </Text>
                           </View>
                         )}
@@ -1487,7 +1834,7 @@ export default function App() {
                       </Pressable>
                     </View>
                     <View style={styles.favoriteActions}>
-                      <Pressable onPress={() => downloadFromLink(item.url)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
+                      <Pressable onPress={() => downloadFromLink(item.url, item.preferredFormat)} style={[styles.historyActionButton, styles.historyPrimaryButton]}>
                         <Text style={styles.historyPrimaryButtonText}>Re-download</Text>
                       </Pressable>
                       <Pressable onPress={() => toggleFavorite(item.url)} style={[styles.historyIconButton, styles.historyIconButtonActive]}>
@@ -1722,6 +2069,73 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     color: '#64748b',
+  },
+  youtubePanel: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    backgroundColor: '#f8fafc',
+  },
+  youtubePanelTitle: {
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '800',
+    color: '#0f172a',
+    marginBottom: 8,
+  },
+  youtubeFormatRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  youtubeFormatChip: {
+    flex: 1,
+    minHeight: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+  },
+  youtubeFormatChipActive: {
+    backgroundColor: '#0f172a',
+    borderColor: '#0f172a',
+  },
+  youtubeFormatChipText: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  youtubeFormatChipTextActive: {
+    color: '#ffffff',
+  },
+  youtubeCheckButton: {
+    marginTop: 8,
+    minHeight: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d5deea',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  youtubeCheckButtonText: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  youtubeInfoText: {
+    marginTop: 8,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#475569',
   },
   button: {
     minHeight: 44,
