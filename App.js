@@ -39,10 +39,12 @@ const INSTAGRAM_DOWNLOAD_HEADERS = {
   'Sec-Fetch-Mode': 'no-cors',
   'Sec-Fetch-Site': 'same-site',
 };
+const DEFAULT_API_BASE_URL = 'https://backendmediqra.vercel.app';
 const API_BASE_URL_STORAGE_FILENAME = 'instasave_api_base_url.txt';
 const CONFIGURED_API_BASE_URLS = [
   Constants?.expoConfig?.extra?.apiBaseUrl,
   Constants?.manifest2?.extra?.apiBaseUrl,
+  DEFAULT_API_BASE_URL,
 ];
 let runtimeApiBaseUrlOverride = '';
 const HISTORY_STORAGE_FILENAME = 'instasave_history.json';
