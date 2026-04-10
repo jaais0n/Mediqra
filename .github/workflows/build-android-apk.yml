@@ -32,8 +32,16 @@ jobs:
       - name: Install app dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Generate Android project
+        run: npx expo prebuild --platform android --non-interactive
+
       - name: Prepare Gradle wrapper
         run: |
+          if [ ! -f android/gradlew ]; then
+            echo "android/gradlew was not generated. Listing repository root for debugging:"
+            ls -la
+            exit 1
+          fi
           sed -i 's/\r$//' android/gradlew
           chmod +x android/gradlew
 
