@@ -378,6 +378,29 @@ function buildSafeSavedFileName(baseName, extension = '') {
   return `${finalBase}${normalizedExt}`;
 }
 
+function normalizeBackendErrorMessage(rawMessage, fallbackMessage) {
+  let parsedMessage = String(rawMessage || '').trim();
+  if (!parsedMessage) {
+    return fallbackMessage;
+  }
+
+  try {
+    const parsed = JSON.parse(parsedMessage);
+    if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) {
+      parsedMessage = parsed.error.trim();
+    }
+  } catch {
+    // Keep original message when the backend did not return JSON.
+  }
+
+  const lowered = parsedMessage.toLowerCase();
+  if (lowered.includes('sign in to confirm you') || lowered.includes('not a bot')) {
+    return 'YouTube temporarily blocked this request. Please try again later. If this keeps happening, backend admin must refresh YOUTUBE_COOKIE in Vercel.';
+  }
+
+  return parsedMessage;
+}
+
 function guessMimeTypeFromFileName(fileName, kind = '') {
   const lowered = String(fileName || '').toLowerCase();
 
@@ -1542,6 +1565,7 @@ export default function App() {
   const youtubeLink = extractYouTubeLink(manualLink);
   const normalizedApiBaseUrl = normalizeApiBaseUrl(apiBaseUrlInput);
   const backendConfigured = Boolean(normalizedApiBaseUrl || getBackendBaseUrl());
+  const showBackendConfig = __DEV__;
   const backendSupportsYouTube = backendCapabilities.youtube !== false;
   const backendSupportsYouTubeMp3 = backendCapabilities.youtubeMp3Conversion !== false;
   const sourceType = instagramLink ? 'instagram' : (youtubeLink ? 'youtube' : 'unknown');
@@ -2246,7 +2270,12 @@ export default function App() {
 
         if (!response.ok) {
           const errorText = await response.text();
-          throw new Error(errorText || `Extraction failed with status ${response.status}`);
+          throw new Error(
+            normalizeBackendErrorMessage(
+              errorText,
+              `Extraction failed with status ${response.status}`
+            )
+          );
         }
 
         const data = await response.json();
@@ -2652,12 +2681,17 @@ export default function App() {
 
   const onDownload = useCallback(() => {
     if (!backendConfigured) {
-      Alert.alert('Backend required', 'Set your production backend API URL first, then try downloading.');
+      Alert.alert(
+        'Service unavailable',
+        showBackendConfig
+          ? 'Set your production backend API URL first, then try downloading.'
+          : 'Download service is not available right now. Please try again shortly.'
+      );
       return;
     }
 
     downloadFromLink(activeLink, effectiveYouTubeFormat, selectedYouTubeFormatId);
-  }, [activeLink, backendConfigured, downloadFromLink, effectiveYouTubeFormat, selectedYouTubeFormatId]);
+  }, [activeLink, backendConfigured, downloadFromLink, effectiveYouTubeFormat, selectedYouTubeFormatId, showBackendConfig]);
 
   const onSaveBackendUrl = useCallback(async () => {
     const normalized = normalizeApiBaseUrl(apiBaseUrlInput || '');
@@ -2877,30 +2911,32 @@ export default function App() {
                   Files are saved to app local storage first, and then to gallery when device permissions allow it.
                 </Text>
 
-                <View style={styles.backendConfigCard}>
-                  <View style={styles.backendConfigHeader}>
-                    <Text style={styles.backendConfigTitle}>Production backend API URL</Text>
-                    <Text style={[styles.backendConfigStatus, backendConfigured ? styles.backendConfigStatusOk : styles.backendConfigStatusWarn]}>
-                      {backendConfigured ? 'Configured' : 'Required'}
-                    </Text>
+                {showBackendConfig && (
+                  <View style={styles.backendConfigCard}>
+                    <View style={styles.backendConfigHeader}>
+                      <Text style={styles.backendConfigTitle}>Production backend API URL</Text>
+                      <Text style={[styles.backendConfigStatus, backendConfigured ? styles.backendConfigStatusOk : styles.backendConfigStatusWarn]}>
+                        {backendConfigured ? 'Configured' : 'Required'}
+                      </Text>
+                    </View>
+                    <TextInput
+                      value={apiBaseUrlInput}
+                      onChangeText={setApiBaseUrlInput}
+                      placeholder="https://api.yourdomain.com"
+                      placeholderTextColor="#94a3b8"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="off"
+                      textContentType="URL"
+                      keyboardType="url"
+                      returnKeyType="done"
+                      style={styles.backendConfigInput}
+                    />
+                    <Pressable onPress={onSaveBackendUrl} style={styles.backendConfigButton}>
+                      <Text style={styles.backendConfigButtonText}>Save backend URL</Text>
+                    </Pressable>
                   </View>
-                  <TextInput
-                    value={apiBaseUrlInput}
-                    onChangeText={setApiBaseUrlInput}
-                    placeholder="https://api.yourdomain.com"
-                    placeholderTextColor="#94a3b8"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    autoComplete="off"
-                    textContentType="URL"
-                    keyboardType="url"
-                    returnKeyType="done"
-                    style={styles.backendConfigInput}
-                  />
-                  <Pressable onPress={onSaveBackendUrl} style={styles.backendConfigButton}>
-                    <Text style={styles.backendConfigButtonText}>Save backend URL</Text>
-                  </Pressable>
-                </View>
+                )}
 
                 {showYouTubePanel && (
                   <View style={styles.youtubePanel}>

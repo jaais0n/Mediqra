@@ -8,9 +8,27 @@ const REQUEST_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36',
 };
 
+function getYouTubeFriendlyError(message, fallback = 'YouTube request failed') {
+  const raw = String(message || '').trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  const lowered = raw.toLowerCase();
+  if (lowered.includes('sign in to confirm') || lowered.includes('not a bot')) {
+    return 'YouTube bot-check blocked this request. Refresh YOUTUBE_COOKIE in Vercel and redeploy.';
+  }
+
+  return raw;
+}
+
 function getYouTubeRequestOptions() {
   const headers = { ...REQUEST_HEADERS };
-  const cookie = String(process.env.YOUTUBE_COOKIE || '').trim();
+  headers.Referer = 'https://www.youtube.com/';
+  headers.Origin = 'https://www.youtube.com';
+
+  const rawCookie = String(process.env.YOUTUBE_COOKIE || '').trim();
+  const cookie = rawCookie.replace(/^cookie\s*:\s*/i, '');
   if (cookie) {
     headers.Cookie = cookie;
   }
@@ -261,9 +279,10 @@ async function handleYouTubeExtract(res, reqUrl) {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(payload));
   } catch (error) {
-    res.statusCode = 500;
+    const message = getYouTubeFriendlyError(error?.message, 'YouTube extract failed');
+    res.statusCode = /bot-check blocked/i.test(message) ? 503 : 500;
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ error: error?.message || 'YouTube extract failed' }));
+    res.end(JSON.stringify({ error: message }));
   }
 }
 
@@ -337,9 +356,10 @@ async function handleYouTubeDownload(req, res, reqUrl) {
 
     stream.pipe(res);
   } catch (error) {
-    res.statusCode = 500;
+    const message = getYouTubeFriendlyError(error?.message, 'YouTube download failed');
+    res.statusCode = /bot-check blocked/i.test(message) ? 503 : 500;
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ error: error?.message || 'YouTube download failed' }));
+    res.end(JSON.stringify({ error: message }));
   }
 }
 
