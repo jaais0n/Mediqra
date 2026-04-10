@@ -8,6 +8,21 @@ const REQUEST_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36',
 };
 
+function normalizeCookieEnvValue(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  // Allow users to paste full request headers and still recover Cookie value.
+  const cookieLineMatch = raw.match(/(?:^|\n)\s*cookie\s*:\s*([^\n]+)/i);
+  if (cookieLineMatch?.[1]) {
+    return cookieLineMatch[1].trim();
+  }
+
+  return raw.replace(/^cookie\s*:\s*/i, '').trim();
+}
+
 function getYouTubeFriendlyError(message, fallback = 'YouTube request failed') {
   const raw = String(message || '').trim();
   if (!raw) {
@@ -27,13 +42,33 @@ function getYouTubeRequestOptions() {
   headers.Referer = 'https://www.youtube.com/';
   headers.Origin = 'https://www.youtube.com';
 
-  const rawCookie = String(process.env.YOUTUBE_COOKIE || '').trim();
-  const cookie = rawCookie.replace(/^cookie\s*:\s*/i, '');
+  const cookie = normalizeCookieEnvValue(process.env.YOUTUBE_COOKIE);
   if (cookie) {
     headers.Cookie = cookie;
   }
 
   return { headers };
+}
+
+async function getYouTubeInfoWithRetry(target) {
+  const requestOptions = getYouTubeRequestOptions();
+  const attempts = [
+    { requestOptions },
+    // These clients often bypass stricter WEB checks for some videos.
+    { requestOptions, playerClients: ['ANDROID', 'WEB'] },
+    { requestOptions, playerClients: ['TVHTML5_SIMPLY_EMBEDDED_PLAYER', 'WEB'] },
+  ];
+
+  let lastError = null;
+  for (const options of attempts) {
+    try {
+      return await ytdl.getInfo(target, options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('No playable formats found');
 }
 
 function setCors(res) {
@@ -273,7 +308,7 @@ async function handleYouTubeExtract(res, reqUrl) {
   }
 
   try {
-    const info = await ytdl.getInfo(target, { requestOptions: getYouTubeRequestOptions() });
+    const info = await getYouTubeInfoWithRetry(target);
     const payload = buildYouTubeOptions(info);
     res.statusCode = 200;
     res.setHeader('content-type', 'application/json');
@@ -311,7 +346,7 @@ async function handleYouTubeDownload(req, res, reqUrl) {
   }
 
   try {
-    const info = await ytdl.getInfo(target, { requestOptions: getYouTubeRequestOptions() });
+    const info = await getYouTubeInfoWithRetry(target);
     const candidates = info.formats.filter((item) => {
       const container = String(item?.container || '').toLowerCase();
       return container === 'mp4' && item?.hasVideo && item?.hasAudio;
