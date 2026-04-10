@@ -20,6 +20,7 @@
     "instagram-url-direct": "^2.0.7",
     "react": "19.1.0",
     "react-native": "0.81.5",
+    "react-native-webview": "13.15.0",
     "yt-dlp-exec": "^1.0.2"
   },
   "private": true,

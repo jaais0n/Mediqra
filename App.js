@@ -7,6 +7,7 @@ import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
+import { WebView } from 'react-native-webview';
 import {
   Alert,
   AppState,
@@ -395,18 +396,13 @@ function normalizeBackendErrorMessage(rawMessage, fallbackMessage) {
 
   const lowered = parsedMessage.toLowerCase();
   if (lowered.includes('python3') && lowered.includes('no such file')) {
-    return 'YouTube is temporarily unavailable on this backend. Use Open web fallback to continue.';
+    return 'YouTube is temporarily unavailable on this backend. Please try again shortly.';
   }
   if (lowered.includes('sign in to confirm you') || lowered.includes('not a bot')) {
-    return 'YouTube is temporarily rate-limited on this backend. Use Open web fallback to continue.';
+    return 'YouTube is temporarily rate-limited on this backend. Please try again shortly.';
   }
 
   return parsedMessage;
-}
-
-function buildYouTubeWebFallbackUrl(youtubeUrl) {
-  const safe = encodeURIComponent(String(youtubeUrl || '').trim());
-  return `https://cobalt.tools/?u=${safe}`;
 }
 
 function guessMimeTypeFromFileName(fileName, kind = '') {
@@ -690,6 +686,180 @@ function extractYouTubeLink(value) {
   }
 
   return null;
+}
+
+function extractYouTubeVideoId(value) {
+  const input = String(value || '').trim();
+  const match = input.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)([^&?]+)/i);
+  return match?.[1] || null;
+}
+
+function parseMaybeJson(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'object') {
+    return value;
+  }
+
+  const text = String(value || '').trim();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function parseYouTubeOptionsFromPlayerPayload(payload, fallbackVideoId = '') {
+  const parsed = parseMaybeJson(payload);
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+
+  const streamingData = parsed?.streamingData;
+  const videoDetails = parsed?.videoDetails || {};
+  const formats = Array.isArray(streamingData?.formats) ? streamingData.formats : [];
+
+  const mp4Options = formats
+    .filter((format) => {
+      const mimeType = String(format?.mimeType || '').toLowerCase();
+      const container = String(format?.container || '').toLowerCase();
+      const hasUrl = typeof format?.url === 'string' && format.url.length > 0;
+      const hasAudio = mimeType.includes('mp4a') || Boolean(format?.audioQuality);
+      const hasVideo = mimeType.includes('video/mp4') || container === 'mp4';
+      return hasUrl && hasAudio && hasVideo;
+    })
+    .map((format) => ({
+      formatId: String(format?.itag || ''),
+      ext: 'mp4',
+      resolution: format?.qualityLabel || (format?.height ? `${format.height}p` : null),
+      fps: Number(format?.fps || 0) || null,
+      hasAudio: true,
+      hasVideo: true,
+      filesize: Number(format?.contentLength || 0) || null,
+      url: null,
+    }))
+    .filter((item) => item.formatId)
+    .sort((a, b) => {
+      const fpsA = Number(a?.fps || 0);
+      const fpsB = Number(b?.fps || 0);
+      if (fpsB !== fpsA) {
+        return fpsB - fpsA;
+      }
+      return parseResolutionHeight(b?.resolution) - parseResolutionHeight(a?.resolution);
+    });
+
+  if (mp4Options.length === 0) {
+    return null;
+  }
+
+  const thumbnails = Array.isArray(videoDetails?.thumbnail?.thumbnails)
+    ? videoDetails.thumbnail.thumbnails
+    : [];
+
+  return {
+    title: videoDetails?.title || null,
+    thumbnail: thumbnails[thumbnails.length - 1]?.url || null,
+    mp4Options,
+    mp3Options: [],
+    mp4Count: mp4Options.length,
+    mp3Count: 0,
+    extractedVia: 'hidden-webview',
+    videoId: videoDetails?.videoId || fallbackVideoId || '',
+  };
+}
+
+function buildHiddenExtractorScript(sessionId) {
+  const sid = String(sessionId || 'session');
+  return `
+(() => {
+  const SID = ${JSON.stringify(sid)};
+  const post = (type, payload) => {
+    try {
+      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({ sid: SID, type, payload }));
+      }
+    } catch {}
+  };
+
+  const sendPlayerResponse = (value) => {
+    try {
+      if (!value) return;
+      const payload = typeof value === 'string' ? value : JSON.stringify(value);
+      post('player_response', payload);
+    } catch {}
+  };
+
+  try {
+    if (window.ytInitialPlayerResponse) {
+      sendPlayerResponse(window.ytInitialPlayerResponse);
+    }
+  } catch {}
+
+  const scanScripts = () => {
+    try {
+      const scripts = Array.from(document.scripts || []);
+      for (const script of scripts) {
+        const text = String(script?.text || '');
+        if (!text || text.indexOf('ytInitialPlayerResponse') === -1) continue;
+        const match = text.match(/ytInitialPlayerResponse\\s*=\\s*(\\{[\\s\\S]*?\\});/);
+        if (match && match[1]) {
+          sendPlayerResponse(match[1]);
+          return;
+        }
+      }
+    } catch {}
+  };
+
+  try {
+    const originalFetch = window.fetch;
+    if (typeof originalFetch === 'function') {
+      window.fetch = async function(...args) {
+        const response = await originalFetch.apply(this, args);
+        try {
+          const url = String(args && args[0] ? args[0] : '');
+          if (url.indexOf('/youtubei/v1/player') !== -1) {
+            const clone = response.clone();
+            const text = await clone.text();
+            post('player_api', text);
+          }
+        } catch {}
+        return response;
+      };
+    }
+  } catch {}
+
+  try {
+    const open = XMLHttpRequest.prototype.open;
+    const send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this.__instasaveUrl = String(url || '');
+      return open.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function(...args) {
+      this.addEventListener('load', function() {
+        try {
+          if (String(this.__instasaveUrl || '').indexOf('/youtubei/v1/player') !== -1 && this.responseText) {
+            post('player_api', this.responseText);
+          }
+        } catch {}
+      });
+      return send.apply(this, args);
+    };
+  } catch {}
+
+  setTimeout(scanScripts, 700);
+  setTimeout(scanScripts, 1600);
+  setTimeout(scanScripts, 3000);
+  post('ready', { ok: true });
+})();
+true;
+`;
 }
 
 function extractSupportedLink(value) {
@@ -1560,6 +1730,7 @@ export default function App() {
   const [selectedRecentUrls, setSelectedRecentUrls] = useState({});
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState('download');
+  const [hiddenExtractorSession, setHiddenExtractorSession] = useState(null);
   const [thumbnailFailures, setThumbnailFailures] = useState({});
   const [completionNotice, setCompletionNotice] = useState(null);
   const lastClipboardValueRef = useRef('');
@@ -1569,6 +1740,7 @@ export default function App() {
   const resetProgressTimerRef = useRef(null);
   const androidDownloadsDirectoryUriRef = useRef(null);
   const androidMediaSubfolderUriRef = useRef({});
+  const hiddenExtractorPendingRef = useRef(null);
   const instagramLink = extractInstagramLink(manualLink);
   const youtubeLink = extractYouTubeLink(manualLink);
   const normalizedApiBaseUrl = normalizeApiBaseUrl(apiBaseUrlInput);
@@ -1950,6 +2122,14 @@ export default function App() {
       if (resetProgressTimerRef.current) {
         clearTimeout(resetProgressTimerRef.current);
       }
+
+      if (hiddenExtractorPendingRef.current?.timeoutId) {
+        clearTimeout(hiddenExtractorPendingRef.current.timeoutId);
+      }
+      if (hiddenExtractorPendingRef.current?.reject) {
+        hiddenExtractorPendingRef.current.reject(new Error('Extractor cancelled'));
+      }
+      hiddenExtractorPendingRef.current = null;
     };
   }, []);
 
@@ -2256,6 +2436,100 @@ export default function App() {
     }
   }, [manualLink]);
 
+  const startHiddenYouTubeExtraction = useCallback(async (youtubeUrl) => {
+    if (!youtubeUrl) {
+      throw new Error('Missing YouTube URL for hidden extractor.');
+    }
+
+    if (hiddenExtractorPendingRef.current?.reject) {
+      hiddenExtractorPendingRef.current.reject(new Error('Extractor session superseded by a new request.'));
+    }
+
+    const videoId = extractYouTubeVideoId(youtubeUrl);
+    const watchUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : youtubeUrl;
+    const sessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        if (hiddenExtractorPendingRef.current?.sessionId === sessionId) {
+          hiddenExtractorPendingRef.current = null;
+          setHiddenExtractorSession(null);
+          reject(new Error('Hidden extractor timed out.'));
+        }
+      }, 15000);
+
+      hiddenExtractorPendingRef.current = {
+        sessionId,
+        resolve,
+        reject,
+        timeoutId,
+        videoId,
+      };
+
+      setHiddenExtractorSession({
+        sessionId,
+        watchUrl,
+        videoId,
+      });
+    });
+  }, []);
+
+  const resolveHiddenExtractorSession = useCallback((sessionId, result, error = null) => {
+    const pending = hiddenExtractorPendingRef.current;
+    if (!pending || pending.sessionId !== sessionId) {
+      return;
+    }
+
+    if (pending.timeoutId) {
+      clearTimeout(pending.timeoutId);
+    }
+    hiddenExtractorPendingRef.current = null;
+    setHiddenExtractorSession(null);
+
+    if (error) {
+      pending.reject(error);
+      return;
+    }
+
+    pending.resolve(result);
+  }, []);
+
+  const onHiddenExtractorMessage = useCallback((event) => {
+    const raw = event?.nativeEvent?.data;
+    if (!raw) {
+      return;
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    const sessionId = String(payload?.sid || '');
+    const messageType = String(payload?.type || '');
+    const pending = hiddenExtractorPendingRef.current;
+    if (!pending || !sessionId || pending.sessionId !== sessionId) {
+      return;
+    }
+
+    if (messageType === 'player_response' || messageType === 'player_api') {
+      const options = parseYouTubeOptionsFromPlayerPayload(payload?.payload, pending.videoId || '');
+      if (options?.mp4Count > 0) {
+        resolveHiddenExtractorSession(sessionId, options);
+      }
+    }
+  }, [resolveHiddenExtractorSession]);
+
+  const onHiddenExtractorError = useCallback(() => {
+    const pending = hiddenExtractorPendingRef.current;
+    if (!pending?.sessionId) {
+      return;
+    }
+    resolveHiddenExtractorSession(pending.sessionId, null, new Error('Hidden extractor failed to load YouTube page.'));
+  }, [resolveHiddenExtractorSession]);
+
   const loadYouTubeOptions = useCallback(async (youtubeUrl) => {
     const candidates = buildYouTubeExtractUrlsForAllHosts(youtubeUrl);
     const fallbackCandidate = buildLocalYouTubeExtractUrl(youtubeUrl);
@@ -2287,21 +2561,40 @@ export default function App() {
         }
 
         const data = await response.json();
+        const mp4Options = Array.isArray(data?.mp4Options)
+          ? data.mp4Options
+          : (Array.isArray(data?.mp4_options) ? data.mp4_options : []);
+        const mp3Options = Array.isArray(data?.mp3Options)
+          ? data.mp3Options
+          : (Array.isArray(data?.mp3_options) ? data.mp3_options : []);
+
         return {
           title: data?.title || null,
-          thumbnail: data?.thumbnail || null,
-          mp4Options: Array.isArray(data?.mp4_options) ? data.mp4_options : [],
-          mp3Options: Array.isArray(data?.mp3_options) ? data.mp3_options : [],
-          mp4Count: Array.isArray(data?.mp4_options) ? data.mp4_options.length : 0,
-          mp3Count: Array.isArray(data?.mp3_options) ? data.mp3_options.length : 0,
+          thumbnail: data?.thumbnail || data?.thumbnailUrl || null,
+          mp4Options,
+          mp3Options,
+          mp4Count: mp4Options.length,
+          mp3Count: mp3Options.length,
         };
       } catch (error) {
         lastError = error;
       }
     }
 
+    try {
+      const hiddenOptions = await startHiddenYouTubeExtraction(youtubeUrl);
+      if (hiddenOptions?.mp4Count > 0) {
+        return hiddenOptions;
+      }
+    } catch (hiddenError) {
+      if (lastError) {
+        throw new Error(`${lastError.message} (Hidden extractor fallback failed)`);
+      }
+      throw hiddenError;
+    }
+
     throw lastError || new Error('YouTube extraction failed.');
-  }, []);
+  }, [startHiddenYouTubeExtraction]);
 
   const showCompletionNotice = useCallback((title, message) => {
     if (noticeTimerRef.current) {
@@ -2519,27 +2812,6 @@ export default function App() {
       );
     } catch (error) {
       const errorMessage = typeof error?.message === 'string' ? error.message : '';
-      const lowered = errorMessage.toLowerCase();
-      const shouldOpenWebFallback =
-        lowered.includes('temporarily blocked') ||
-        lowered.includes('not a bot') ||
-        lowered.includes('innertube unavailable') ||
-        lowered.includes('innertube api returned 400');
-
-      if (shouldOpenWebFallback) {
-        const fallbackUrl = buildYouTubeWebFallbackUrl(youtubeUrl);
-        try {
-          const canOpen = await Linking.canOpenURL(fallbackUrl);
-          if (canOpen) {
-            await Linking.openURL(fallbackUrl);
-            Alert.alert('YouTube blocked on backend', 'Opened web fallback so you can continue download there.');
-            return;
-          }
-        } catch {
-          // Fall through to normal error alert.
-        }
-      }
-
       Alert.alert(
         'Download failed',
         errorMessage
@@ -2775,25 +3047,6 @@ export default function App() {
       setIsCheckingYouTubeOptions(false);
     }
   }, [loadYouTubeOptions, youtubeLink]);
-
-  const onOpenYouTubeWebFallback = useCallback(async () => {
-    if (!youtubeLink) {
-      Alert.alert('Missing YouTube link', 'Paste a valid YouTube URL first.');
-      return;
-    }
-
-    const fallbackUrl = buildYouTubeWebFallbackUrl(youtubeLink);
-    try {
-      const supported = await Linking.canOpenURL(fallbackUrl);
-      if (!supported) {
-        Alert.alert('Cannot open browser', 'Your device cannot open the fallback page right now.');
-        return;
-      }
-      await Linking.openURL(fallbackUrl);
-    } catch {
-      Alert.alert('Open failed', 'Could not open the fallback page. Please try again.');
-    }
-  }, [youtubeLink]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3094,12 +3347,7 @@ export default function App() {
                     )}
 
                     {!!youtubeOptionsError && (
-                      <>
-                        <Text style={styles.youtubeErrorText}>{youtubeOptionsError}</Text>
-                        <Pressable style={styles.youtubeFallbackButton} onPress={onOpenYouTubeWebFallback}>
-                          <Text style={styles.youtubeFallbackButtonText}>Open web fallback</Text>
-                        </Pressable>
-                      </>
+                      <Text style={styles.youtubeErrorText}>{youtubeOptionsError}</Text>
                     )}
                   </View>
                 )}
@@ -3381,6 +3629,25 @@ export default function App() {
         })}
       </View>
 
+      {hiddenExtractorSession?.watchUrl ? (
+        <View pointerEvents="none" style={styles.hiddenExtractorContainer}>
+          <WebView
+            source={{ uri: hiddenExtractorSession.watchUrl }}
+            style={styles.hiddenExtractorWebView}
+            javaScriptEnabled
+            domStorageEnabled
+            allowsInlineMediaPlayback
+            mediaPlaybackRequiresUserAction
+            injectedJavaScript={buildHiddenExtractorScript(hiddenExtractorSession.sessionId)}
+            onMessage={onHiddenExtractorMessage}
+            onError={onHiddenExtractorError}
+            onHttpError={onHiddenExtractorError}
+            originWhitelist={['https://*']}
+            userAgent={INSTAGRAM_DOWNLOAD_HEADERS['User-Agent']}
+          />
+        </View>
+      ) : null}
+
     </SafeAreaView>
   );
 }
@@ -3390,6 +3657,19 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f8fafc',
     position: 'relative',
+  },
+  hiddenExtractorContainer: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    left: -100,
+    top: -100,
+  },
+  hiddenExtractorWebView: {
+    width: 1,
+    height: 1,
+    opacity: 0,
   },
   backgroundGlowTop: {
     position: 'absolute',
@@ -3752,23 +4032,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     color: '#b91c1c',
-  },
-  youtubeFallbackButton: {
-    marginTop: 8,
-    minHeight: 36,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#0f172a',
-    backgroundColor: '#ffffff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 10,
-  },
-  youtubeFallbackButtonText: {
-    fontSize: 12,
-    lineHeight: 16,
-    fontWeight: '800',
-    color: '#0f172a',
   },
   button: {
     minHeight: 44,
