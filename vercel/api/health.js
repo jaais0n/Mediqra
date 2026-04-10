@@ -14,11 +14,11 @@ module.exports = async function health(req, res) {
   res.end(JSON.stringify({
     ok: true,
     provider: 'vercel',
-    build: '2026-04-10-youtube-hardening-2',
+    build: '2026-04-10-instagram-only',
     instagram: true,
-    youtube: true,
-    youtubeMode: 'native-limited+piped-fallback',
+    youtube: false,
+    youtubeMode: 'disabled',
     youtubeMp3Conversion: false,
-    youtubeCookieConfigured: Boolean(String(process.env.YOUTUBE_COOKIE || '').trim()),
+    youtubeCookieConfigured: false,
   }));
 };

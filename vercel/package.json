@@ -6,7 +6,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@distube/ytdl-core": "^4.16.12",
     "instagram-url-direct": "^2.0.7"
   }
 }

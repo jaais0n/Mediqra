@@ -863,7 +863,7 @@ true;
 }
 
 function extractSupportedLink(value) {
-  return extractInstagramLink(value) || extractYouTubeLink(value);
+  return extractInstagramLink(value);
 }
 
 function extractMetaContent(html, propertyName) {
@@ -1711,8 +1711,8 @@ export default function App() {
   const [apiBaseUrlInput, setApiBaseUrlInput] = useState(() => getBackendBaseUrl() || '');
   const [backendCapabilities, setBackendCapabilities] = useState({
     instagram: true,
-    youtube: true,
-    youtubeMp3Conversion: true,
+    youtube: false,
+    youtubeMp3Conversion: false,
   });
   const [youtubeOptions, setYoutubeOptions] = useState(null);
   const [isCheckingYouTubeOptions, setIsCheckingYouTubeOptions] = useState(false);
@@ -1742,21 +1742,21 @@ export default function App() {
   const androidMediaSubfolderUriRef = useRef({});
   const hiddenExtractorPendingRef = useRef(null);
   const instagramLink = extractInstagramLink(manualLink);
-  const youtubeLink = extractYouTubeLink(manualLink);
+  const youtubeLink = null;
   const normalizedApiBaseUrl = normalizeApiBaseUrl(apiBaseUrlInput);
   const backendConfigured = Boolean(normalizedApiBaseUrl || getBackendBaseUrl());
   const showBackendConfig = __DEV__;
-  const backendSupportsYouTube = backendCapabilities.youtube !== false;
-  const backendSupportsYouTubeMp3 = backendCapabilities.youtubeMp3Conversion !== false;
-  const sourceType = instagramLink ? 'instagram' : (youtubeLink ? 'youtube' : 'unknown');
+  const backendSupportsYouTube = false;
+  const backendSupportsYouTubeMp3 = false;
+  const sourceType = instagramLink ? 'instagram' : 'unknown';
   const hasLink = sourceType !== 'unknown';
-  const activeLink = sourceType === 'youtube' ? youtubeLink : instagramLink;
-  const isPotentialYouTubeInput = /(?:youtu\.be|youtube\.com|youtube)/i.test(manualLink);
+  const activeLink = instagramLink;
+  const isPotentialYouTubeInput = false;
   const recentDownloads = downloadHistory.slice(0, MAX_HISTORY_ITEMS);
   const favoriteDownloads = downloadHistory.filter((item) => item.favorite);
-  const isYouTubeActive = sourceType === 'youtube';
-  const showYouTubePanel = backendConfigured && backendSupportsYouTube && (isYouTubeActive || isPotentialYouTubeInput);
-  const sourceLabel = isYouTubeActive ? 'YouTube' : 'Instagram';
+  const isYouTubeActive = false;
+  const showYouTubePanel = false;
+  const sourceLabel = 'Instagram';
   const sortedMp4Options = sortYouTubeMp4Options(youtubeOptions?.mp4Options || []).filter((item) => parseResolutionHeight(item?.resolution) >= 720);
   const sortedMp3Options = sortYouTubeMp3Options(youtubeOptions?.mp3Options || []);
   const effectiveYouTubeFormat = !backendSupportsYouTubeMp3 && selectedYouTubeFormat === 'mp3'
@@ -1783,7 +1783,7 @@ export default function App() {
     const baseUrl = normalizedApiBaseUrl || getBackendBaseUrl();
 
     if (!baseUrl) {
-      setBackendCapabilities({ instagram: true, youtube: true, youtubeMp3Conversion: true });
+      setBackendCapabilities({ instagram: true, youtube: false, youtubeMp3Conversion: false });
       return () => {
         active = false;
       };
@@ -1806,15 +1806,15 @@ export default function App() {
 
         setBackendCapabilities({
           instagram: data?.instagram !== false,
-          youtube: data?.youtube !== false,
-          youtubeMp3Conversion: data?.youtubeMp3Conversion !== false,
+          youtube: false,
+          youtubeMp3Conversion: false,
         });
       } catch {
         if (!active) {
           return;
         }
 
-        setBackendCapabilities({ instagram: true, youtube: true, youtubeMp3Conversion: true });
+        setBackendCapabilities({ instagram: true, youtube: false, youtubeMp3Conversion: false });
       }
     })();
 
@@ -2421,7 +2421,7 @@ export default function App() {
   const openShareSheet = useCallback(async () => {
     const supportedLink = extractSupportedLink(manualLink);
     if (!supportedLink) {
-      Alert.alert('Invalid link', 'Paste a valid Instagram or YouTube link before sharing.');
+      Alert.alert('Invalid link', 'Paste a valid Instagram link before sharing.');
       return;
     }
 
@@ -2956,29 +2956,14 @@ export default function App() {
     }
   }, [backendSupportsYouTubeMp3, ensureMediaLibraryPermission, isDownloading, loadYouTubeOptions, recordYouTubeHistory, resetDownloadProgress, runDownloadWithProgress, saveFileToPhoneDownloads, saveToMediaLibraryAndResolveUri, selectedYouTubeFormat, selectedYouTubeMp3FormatId, selectedYouTubeMp4FormatId, showCompletionNotice]);
 
-  const downloadFromLink = useCallback((link, preferredFormat, preferredFormatId) => {
+  const downloadFromLink = useCallback((link) => {
     const instagramCandidate = extractInstagramLink(link);
     if (instagramCandidate) {
       downloadInstagramFromLink(instagramCandidate);
       return;
     }
-
-    const youtubeCandidate = extractYouTubeLink(link);
-    if (youtubeCandidate) {
-      if (!backendSupportsYouTube) {
-        Alert.alert('Backend does not support YouTube', 'The configured Vercel backend is Instagram-only. Use an Instagram link or deploy a YouTube-capable backend elsewhere.');
-        return;
-      }
-      if (!backendConfigured) {
-        Alert.alert('Backend required', 'YouTube downloads require a production backend API URL. Configure `expo.extra.apiBaseUrl` and rebuild the app.');
-        return;
-      }
-      downloadYouTubeFromLink(youtubeCandidate, preferredFormat, preferredFormatId);
-      return;
-    }
-
-    Alert.alert('Invalid link', 'Paste a valid Instagram or YouTube link to continue.');
-  }, [backendConfigured, backendSupportsYouTube, downloadInstagramFromLink, downloadYouTubeFromLink]);
+    Alert.alert('Invalid link', 'Paste a valid Instagram link to continue.');
+  }, [downloadInstagramFromLink]);
 
   const onDownload = useCallback(() => {
     if (!backendConfigured) {
@@ -2991,8 +2976,8 @@ export default function App() {
       return;
     }
 
-    downloadFromLink(activeLink, effectiveYouTubeFormat, selectedYouTubeFormatId);
-  }, [activeLink, backendConfigured, downloadFromLink, effectiveYouTubeFormat, selectedYouTubeFormatId, showBackendConfig]);
+    downloadFromLink(activeLink);
+  }, [activeLink, backendConfigured, downloadFromLink, showBackendConfig]);
 
   const onSaveBackendUrl = useCallback(async () => {
     const normalized = normalizeApiBaseUrl(apiBaseUrlInput || '');
@@ -3013,8 +2998,8 @@ export default function App() {
           const data = await response.json();
           setBackendCapabilities({
             instagram: data?.instagram !== false,
-            youtube: data?.youtube !== false,
-            youtubeMp3Conversion: data?.youtubeMp3Conversion !== false,
+            youtube: false,
+            youtubeMp3Conversion: false,
           });
         }
       } catch {
@@ -3028,25 +3013,8 @@ export default function App() {
   }, [apiBaseUrlInput]);
 
   const onCheckYouTubeOptions = useCallback(async () => {
-    if (!youtubeLink) {
-      setYoutubeOptionsError('Enter a full YouTube URL to load formats.');
-      Alert.alert('Invalid link', 'Paste a valid YouTube link first.');
-      return;
-    }
-
-    setYoutubeOptionsError('');
-    setIsCheckingYouTubeOptions(true);
-    try {
-      const options = await loadYouTubeOptions(youtubeLink);
-      setYoutubeOptions(options);
-    } catch (error) {
-      const message = typeof error?.message === 'string' ? error.message : 'Could not load YouTube formats.';
-      setYoutubeOptionsError(message);
-      Alert.alert('Format check failed', message);
-    } finally {
-      setIsCheckingYouTubeOptions(false);
-    }
-  }, [loadYouTubeOptions, youtubeLink]);
+    Alert.alert('Unsupported', 'YouTube is disabled in this build. Use an Instagram link.');
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -3094,7 +3062,7 @@ export default function App() {
 
     const supportedLink = extractSupportedLink(text);
     if (!supportedLink) {
-      Alert.alert('No supported link found', 'Your clipboard does not contain an Instagram or YouTube URL.');
+      Alert.alert('No supported link found', 'Your clipboard does not contain an Instagram URL.');
       return;
     }
 
@@ -3206,7 +3174,7 @@ export default function App() {
                 />
 
                 <Text style={styles.helperText}>
-                  Paste a public Instagram or YouTube URL.
+                  Paste a public Instagram URL.
                 </Text>
                 <Text style={styles.helperTextSecondary}>
                   Files are saved to app local storage first, and then to gallery when device permissions allow it.

@@ -1,6 +1,5 @@
 const { instagramGetUrl } = require('instagram-url-direct');
 const { Readable } = require('node:stream');
-const ytdl = require('@distube/ytdl-core');
 
 const REQUEST_HEADERS = {
   Accept: '*/*',
@@ -870,6 +869,4 @@ module.exports = {
   handleInstagramExtract,
   handleInstagramDownload,
   proxyUpstreamUrl,
-  handleYouTubeExtract,
-  handleYouTubeDownload,
 };
