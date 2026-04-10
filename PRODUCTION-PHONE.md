@@ -1,4 +1,4 @@
-# Mediqra Production (Phone-Only, No PC Proxy)
+# Instasave Production (Phone-Only, No PC Proxy)
 
 Use this single path only.
 

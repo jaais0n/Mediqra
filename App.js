@@ -3114,7 +3114,7 @@ export default function App() {
       >
         <View style={styles.header}>
           <View style={styles.kickerPill}>
-            <Text style={styles.kickerText}>Mediqra</Text>
+            <Text style={styles.kickerText}>Instasave</Text>
           </View>
           <Text style={styles.title}>Download Instagram media</Text>
           <Text style={styles.subtitle}>
