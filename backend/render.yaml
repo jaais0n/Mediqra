@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: mediqra-backend
-    env: docker
-    rootDir: InstaSave/backend
-    dockerfilePath: ./Dockerfile
-    healthCheckPath: /health
-    autoDeploy: true

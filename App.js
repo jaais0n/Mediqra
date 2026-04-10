@@ -13,7 +13,6 @@ import {
   Animated,
   Easing,
   Image,
-  NativeModules,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -40,7 +39,6 @@ const INSTAGRAM_DOWNLOAD_HEADERS = {
   'Sec-Fetch-Mode': 'no-cors',
   'Sec-Fetch-Site': 'same-site',
 };
-const LOCAL_PROXY_PORT = 8787;
 const API_BASE_URL_STORAGE_FILENAME = 'instasave_api_base_url.txt';
 const CONFIGURED_API_BASE_URLS = [
   Constants?.expoConfig?.extra?.apiBaseUrl,
@@ -93,37 +91,6 @@ function getConfiguredApiBaseUrlCandidates() {
     }
   }
 
-  const scriptURL = NativeModules?.SourceCode?.scriptURL;
-  if (scriptURL) {
-    try {
-      const parsed = new URL(scriptURL);
-      if (parsed.hostname && isRunningInExpoGo()) {
-        candidates.push(`http://${parsed.hostname}:${LOCAL_PROXY_PORT}`);
-      }
-    } catch {
-      // Ignore parse errors and continue with fallbacks.
-    }
-  }
-
-  const expoHostUri =
-    Constants?.expoConfig?.hostUri ||
-    Constants?.manifest2?.extra?.expoClient?.hostUri ||
-    Constants?.expoGoConfig?.debuggerHost;
-  if (expoHostUri && typeof expoHostUri === 'string') {
-    const host = expoHostUri.split(':')[0];
-    if (host && isRunningInExpoGo()) {
-      candidates.push(`http://${host}:${LOCAL_PROXY_PORT}`);
-    }
-  }
-
-  const platformServerHost = NativeModules?.PlatformConstants?.ServerHost;
-  if (platformServerHost && typeof platformServerHost === 'string') {
-    const host = platformServerHost.split(':')[0];
-    if (host && isRunningInExpoGo()) {
-      candidates.push(`http://${host}:${LOCAL_PROXY_PORT}`);
-    }
-  }
-
   const seen = new Set();
   const ordered = [];
   for (const baseUrl of candidates) {
@@ -137,17 +104,16 @@ function getConfiguredApiBaseUrlCandidates() {
   return ordered;
 }
 
-function isRunningInExpoGo() {
-  const ownership = Constants?.appOwnership;
-  return ownership === 'expo';
-}
-
 function getBackendBaseUrl() {
   const candidates = getConfiguredApiBaseUrlCandidates();
   if (candidates.length === 0) {
     return null;
   }
   return candidates[0];
+}
+
+function isRunningInExpoGo() {
+  return Constants?.appOwnership === 'expo';
 }
 
 function buildLocalProxyUrl(targetUrl, referer) {
@@ -1235,17 +1201,21 @@ async function resolveInstagramMediaInfos(instagramLink) {
       if (extRes.ok) {
         const extData = await extRes.json();
         const proxyItems = [];
+        const details = Array.isArray(extData?.media_details) ? extData.media_details : [];
+        const listUrls = Array.isArray(extData?.url_list) ? extData.url_list : [];
 
-        if (extData && Array.isArray(extData.media_details) && extData.media_details.length > 0) {
-          extData.media_details.forEach((item) => {
+        if (details.length > 0) {
+          details.forEach((item) => {
             if (!item?.url) {
               return;
             }
 
-            const declaredType = String(item?.type || '').toLowerCase();
-            const kind = declaredType === 'video' || declaredType === 'image'
-              ? declaredType
-              : inferInstagramMediaKindFromUrl(item.url, isReel ? 'video' : 'image');
+            const declaredType = String(item?.type || item?.media_type || '').toLowerCase();
+            const kind = declaredType.includes('video')
+              ? 'video'
+              : declaredType.includes('image')
+                ? 'image'
+                : inferInstagramMediaKindFromUrl(item.url, isReel ? 'video' : 'image');
 
             proxyItems.push({
               url: item.url,
@@ -1255,8 +1225,9 @@ async function resolveInstagramMediaInfos(instagramLink) {
           });
         }
 
-        if (extData && Array.isArray(extData.url_list) && extData.url_list.length > 0) {
-          extData.url_list.forEach((url) => {
+        // url_list commonly lacks reliable media type metadata.
+        if (proxyItems.length === 0 && listUrls.length > 0) {
+          listUrls.forEach((url) => {
             if (!url) {
               return;
             }
@@ -1535,6 +1506,11 @@ async function resolveInstagramMediaInfos(instagramLink) {
 export default function App() {
   const [manualLink, setManualLink] = useState('');
   const [apiBaseUrlInput, setApiBaseUrlInput] = useState(() => getBackendBaseUrl() || '');
+  const [backendCapabilities, setBackendCapabilities] = useState({
+    instagram: true,
+    youtube: true,
+    youtubeMp3Conversion: true,
+  });
   const [youtubeOptions, setYoutubeOptions] = useState(null);
   const [isCheckingYouTubeOptions, setIsCheckingYouTubeOptions] = useState(false);
   const [youtubeOptionsError, setYoutubeOptionsError] = useState('');
@@ -1564,6 +1540,8 @@ export default function App() {
   const youtubeLink = extractYouTubeLink(manualLink);
   const normalizedApiBaseUrl = normalizeApiBaseUrl(apiBaseUrlInput);
   const backendConfigured = Boolean(normalizedApiBaseUrl || getBackendBaseUrl());
+  const backendSupportsYouTube = backendCapabilities.youtube !== false;
+  const backendSupportsYouTubeMp3 = backendCapabilities.youtubeMp3Conversion !== false;
   const sourceType = instagramLink ? 'instagram' : (youtubeLink ? 'youtube' : 'unknown');
   const hasLink = sourceType !== 'unknown';
   const activeLink = sourceType === 'youtube' ? youtubeLink : instagramLink;
@@ -1571,12 +1549,15 @@ export default function App() {
   const recentDownloads = downloadHistory.slice(0, MAX_HISTORY_ITEMS);
   const favoriteDownloads = downloadHistory.filter((item) => item.favorite);
   const isYouTubeActive = sourceType === 'youtube';
-  const showYouTubePanel = backendConfigured && (isYouTubeActive || isPotentialYouTubeInput);
+  const showYouTubePanel = backendConfigured && backendSupportsYouTube && (isYouTubeActive || isPotentialYouTubeInput);
   const sourceLabel = isYouTubeActive ? 'YouTube' : 'Instagram';
   const sortedMp4Options = sortYouTubeMp4Options(youtubeOptions?.mp4Options || []).filter((item) => parseResolutionHeight(item?.resolution) >= 720);
   const sortedMp3Options = sortYouTubeMp3Options(youtubeOptions?.mp3Options || []);
-  const selectedYouTubeFormatOptions = selectedYouTubeFormat === 'mp4' ? sortedMp4Options : sortedMp3Options;
-  const selectedYouTubeFormatId = selectedYouTubeFormat === 'mp4'
+  const effectiveYouTubeFormat = !backendSupportsYouTubeMp3 && selectedYouTubeFormat === 'mp3'
+    ? 'mp4'
+    : selectedYouTubeFormat;
+  const selectedYouTubeFormatOptions = effectiveYouTubeFormat === 'mp4' ? sortedMp4Options : sortedMp3Options;
+  const selectedYouTubeFormatId = effectiveYouTubeFormat === 'mp4'
     ? selectedYouTubeMp4FormatId
     : (selectedYouTubeMp3FormatId || sortedMp3Options[0]?.formatId || '');
   const maxAvailableFps = sortedMp4Options.reduce((highest, item) => Math.max(highest, Number(item?.fps || 0)), 0);
@@ -1590,6 +1571,51 @@ export default function App() {
   useEffect(() => {
     setRuntimeApiBaseUrlOverride(apiBaseUrlInput);
   }, [apiBaseUrlInput]);
+
+  useEffect(() => {
+    let active = true;
+    const baseUrl = normalizedApiBaseUrl || getBackendBaseUrl();
+
+    if (!baseUrl) {
+      setBackendCapabilities({ instagram: true, youtube: true, youtubeMp3Conversion: true });
+      return () => {
+        active = false;
+      };
+    }
+
+    (async () => {
+      try {
+        const response = await fetch(new URL('/health', baseUrl).toString(), {
+          headers: { Accept: 'application/json' },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Health check failed (${response.status})`);
+        }
+
+        const data = await response.json();
+        if (!active) {
+          return;
+        }
+
+        setBackendCapabilities({
+          instagram: data?.instagram !== false,
+          youtube: data?.youtube !== false,
+          youtubeMp3Conversion: data?.youtubeMp3Conversion !== false,
+        });
+      } catch {
+        if (!active) {
+          return;
+        }
+
+        setBackendCapabilities({ instagram: true, youtube: true, youtubeMp3Conversion: true });
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [normalizedApiBaseUrl]);
 
   useEffect(() => {
     let active = true;
@@ -1854,6 +1880,12 @@ export default function App() {
 
     return destinationUri;
   }, []);
+
+  useEffect(() => {
+    if (!backendSupportsYouTubeMp3 && selectedYouTubeFormat === 'mp3') {
+      setSelectedYouTubeFormat('mp4');
+    }
+  }, [backendSupportsYouTubeMp3, selectedYouTubeFormat]);
 
   useEffect(() => {
     if (!showYouTubePanel) {
@@ -2480,6 +2512,10 @@ export default function App() {
       const loadedOptions = await loadYouTubeOptions(youtubeUrl);
       setYoutubeOptions(loadedOptions);
 
+      if (resolvedFormat === 'mp3' && !backendSupportsYouTubeMp3) {
+        throw new Error('MP3 conversion is not available on this backend. Choose MP4 video.');
+      }
+
       if (resolvedFormat === 'mp3' && loadedOptions.mp3Count === 0) {
         throw new Error('No MP3 stream available for this YouTube video.');
       }
@@ -2586,7 +2622,7 @@ export default function App() {
       setIsDownloading(false);
       resetDownloadProgress(900);
     }
-  }, [ensureMediaLibraryPermission, isDownloading, loadYouTubeOptions, recordYouTubeHistory, resetDownloadProgress, runDownloadWithProgress, saveFileToPhoneDownloads, saveToMediaLibraryAndResolveUri, selectedYouTubeFormat, selectedYouTubeMp3FormatId, selectedYouTubeMp4FormatId, showCompletionNotice]);
+  }, [backendSupportsYouTubeMp3, ensureMediaLibraryPermission, isDownloading, loadYouTubeOptions, recordYouTubeHistory, resetDownloadProgress, runDownloadWithProgress, saveFileToPhoneDownloads, saveToMediaLibraryAndResolveUri, selectedYouTubeFormat, selectedYouTubeMp3FormatId, selectedYouTubeMp4FormatId, showCompletionNotice]);
 
   const downloadFromLink = useCallback((link, preferredFormat, preferredFormatId) => {
     const instagramCandidate = extractInstagramLink(link);
@@ -2597,6 +2633,10 @@ export default function App() {
 
     const youtubeCandidate = extractYouTubeLink(link);
     if (youtubeCandidate) {
+      if (!backendSupportsYouTube) {
+        Alert.alert('Backend does not support YouTube', 'The configured Vercel backend is Instagram-only. Use an Instagram link or deploy a YouTube-capable backend elsewhere.');
+        return;
+      }
       if (!backendConfigured) {
         Alert.alert('Backend required', 'YouTube downloads require a production backend API URL. Configure `expo.extra.apiBaseUrl` and rebuild the app.');
         return;
@@ -2606,7 +2646,7 @@ export default function App() {
     }
 
     Alert.alert('Invalid link', 'Paste a valid Instagram or YouTube link to continue.');
-  }, [backendConfigured, downloadInstagramFromLink, downloadYouTubeFromLink]);
+  }, [backendConfigured, backendSupportsYouTube, downloadInstagramFromLink, downloadYouTubeFromLink]);
 
   const onDownload = useCallback(() => {
     if (!backendConfigured) {
@@ -2614,8 +2654,8 @@ export default function App() {
       return;
     }
 
-    downloadFromLink(activeLink, selectedYouTubeFormat, selectedYouTubeFormatId);
-  }, [activeLink, backendConfigured, downloadFromLink, selectedYouTubeFormat, selectedYouTubeFormatId]);
+    downloadFromLink(activeLink, effectiveYouTubeFormat, selectedYouTubeFormatId);
+  }, [activeLink, backendConfigured, downloadFromLink, effectiveYouTubeFormat, selectedYouTubeFormatId]);
 
   const onSaveBackendUrl = useCallback(async () => {
     const normalized = normalizeApiBaseUrl(apiBaseUrlInput || '');
@@ -2628,6 +2668,22 @@ export default function App() {
     setRuntimeApiBaseUrlOverride(normalized);
     try {
       await saveApiBaseUrl(normalized);
+      try {
+        const response = await fetch(new URL('/health', normalized).toString(), {
+          headers: { Accept: 'application/json' },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setBackendCapabilities({
+            instagram: data?.instagram !== false,
+            youtube: data?.youtube !== false,
+            youtubeMp3Conversion: data?.youtubeMp3Conversion !== false,
+          });
+        }
+      } catch {
+        // Ignore capability check errors here; the app will fall back gracefully.
+      }
+
       Alert.alert('Backend saved', `API base URL set to ${normalized}`);
     } catch {
       Alert.alert('Save failed', 'Could not persist backend URL on this device.');
@@ -2864,58 +2920,64 @@ export default function App() {
                           MP4 Video
                         </Text>
                       </Pressable>
-                      <Pressable
-                        style={[
-                          styles.youtubeFormatChip,
-                          selectedYouTubeFormat === 'mp3' && styles.youtubeFormatChipActive,
-                        ]}
-                        onPress={() => setSelectedYouTubeFormat('mp3')}
-                      >
-                        <Text
+                      {backendSupportsYouTubeMp3 && (
+                        <Pressable
                           style={[
-                            styles.youtubeFormatChipText,
-                            selectedYouTubeFormat === 'mp3' && styles.youtubeFormatChipTextActive,
+                            styles.youtubeFormatChip,
+                            selectedYouTubeFormat === 'mp3' && styles.youtubeFormatChipActive,
                           ]}
+                          onPress={() => setSelectedYouTubeFormat('mp3')}
                         >
-                          MP3 Audio
-                        </Text>
-                      </Pressable>
+                          <Text
+                            style={[
+                              styles.youtubeFormatChipText,
+                              selectedYouTubeFormat === 'mp3' && styles.youtubeFormatChipTextActive,
+                            ]}
+                          >
+                            MP3 Audio
+                          </Text>
+                        </Pressable>
+                      )}
                     </View>
+
+                    {!backendSupportsYouTubeMp3 && (
+                      <Text style={styles.youtubeInfoText}>This backend supports MP4 only. MP3 conversion is disabled.</Text>
+                    )}
 
                     <Pressable style={styles.youtubeCheckButton} onPress={onCheckYouTubeOptions}>
                       <Text style={styles.youtubeCheckButtonText}>{isCheckingYouTubeOptions ? 'Checking formats...' : 'Check available formats'}</Text>
                     </Pressable>
 
                     {isCheckingYouTubeOptions && !youtubeOptions && (
-                      <Text style={styles.youtubeInfoText}>Fetching available MP4/MP3 formats...</Text>
+                      <Text style={styles.youtubeInfoText}>Fetching available formats...</Text>
                     )}
 
                     {youtubeOptions && (
                       <View style={styles.youtubeFormatsWrap}>
                         <Text style={styles.youtubeInfoText}>
                           {youtubeOptions.title ? `${youtubeOptions.title} • ` : ''}
-                          {sortedMp4Options.length} MP4 option{sortedMp4Options.length === 1 ? '' : 's'} from 720p+ • Max FPS {maxAvailableFps || 'N/A'} • MP3 max {maxAvailableMp3Abr ? `${Math.round(maxAvailableMp3Abr)} kbps` : 'N/A'}
+                          {sortedMp4Options.length} MP4 option{sortedMp4Options.length === 1 ? '' : 's'} from 720p+ • Max FPS {maxAvailableFps || 'N/A'}{backendSupportsYouTubeMp3 ? ` • MP3 max ${maxAvailableMp3Abr ? `${Math.round(maxAvailableMp3Abr)} kbps` : 'N/A'}` : ' • MP3 unavailable on this backend'}
                         </Text>
 
                         <View style={styles.youtubeTypesGroup}>
                           <Text style={styles.youtubeTypesHeading}>
-                            {selectedYouTubeFormat === 'mp4' ? 'MP4 types (720p to max)' : 'MP3 highest quality'}
+                            {effectiveYouTubeFormat === 'mp4' ? 'MP4 types (720p to max)' : 'MP3 highest quality'}
                           </Text>
 
-                          {selectedYouTubeFormat === 'mp4' && selectedYouTubeFormatOptions.length === 0 ? (
+                          {effectiveYouTubeFormat === 'mp4' && selectedYouTubeFormatOptions.length === 0 ? (
                             <Text style={styles.youtubeTypeItem}>No MP4 formats found from 720p or higher.</Text>
                           ) : (
-                            selectedYouTubeFormat === 'mp4' ? selectedYouTubeFormatOptions.map((opt, idx) => {
+                            effectiveYouTubeFormat === 'mp4' ? selectedYouTubeFormatOptions.map((opt, idx) => {
                               const formatId = opt?.formatId || '';
                               const selected = formatId === selectedYouTubeFormatId;
                               const label = `${opt?.resolution || 'video'}${opt?.fps ? ` · ${opt.fps}fps` : ''}${opt?.hasAudio ? ' · with audio' : ' · video only'}`;
 
                               return (
                                 <Pressable
-                                  key={`${selectedYouTubeFormat}-${formatId || idx}`}
+                                  key={`${effectiveYouTubeFormat}-${formatId || idx}`}
                                   style={[styles.youtubeTypeItemButton, selected && styles.youtubeTypeItemButtonActive]}
                                   onPress={() => {
-                                    if (selectedYouTubeFormat === 'mp4') {
+                                    if (effectiveYouTubeFormat === 'mp4') {
                                       setSelectedYouTubeMp4FormatId(formatId);
                                     } else {
                                       setSelectedYouTubeMp3FormatId(formatId);

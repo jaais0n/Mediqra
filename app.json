@@ -21,7 +21,7 @@
       "fallbackToCacheTimeout": 0
     },
     "extra": {
-      "apiBaseUrl": ""
+      "apiBaseUrl": "https://backendmediqra.vercel.app"
     },
     "android": {
       "adaptiveIcon": {
