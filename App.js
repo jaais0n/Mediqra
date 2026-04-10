@@ -395,7 +395,7 @@ function normalizeBackendErrorMessage(rawMessage, fallbackMessage) {
 
   const lowered = parsedMessage.toLowerCase();
   if (lowered.includes('sign in to confirm you') || lowered.includes('not a bot')) {
-    return 'YouTube temporarily blocked this request. Please try again later. If this keeps happening, backend admin must refresh YOUTUBE_COOKIE in Vercel.';
+    return 'YouTube temporarily blocked this request. Please try again in a moment.';
   }
 
   return parsedMessage;
