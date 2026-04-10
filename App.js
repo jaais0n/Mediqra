@@ -2519,6 +2519,27 @@ export default function App() {
       );
     } catch (error) {
       const errorMessage = typeof error?.message === 'string' ? error.message : '';
+      const lowered = errorMessage.toLowerCase();
+      const shouldOpenWebFallback =
+        lowered.includes('temporarily blocked') ||
+        lowered.includes('not a bot') ||
+        lowered.includes('innertube unavailable') ||
+        lowered.includes('innertube api returned 400');
+
+      if (shouldOpenWebFallback) {
+        const fallbackUrl = buildYouTubeWebFallbackUrl(youtubeUrl);
+        try {
+          const canOpen = await Linking.canOpenURL(fallbackUrl);
+          if (canOpen) {
+            await Linking.openURL(fallbackUrl);
+            Alert.alert('YouTube blocked on backend', 'Opened web fallback so you can continue download there.');
+            return;
+          }
+        } catch {
+          // Fall through to normal error alert.
+        }
+      }
+
       Alert.alert(
         'Download failed',
         errorMessage
