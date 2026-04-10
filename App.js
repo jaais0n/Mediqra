@@ -394,11 +394,19 @@ function normalizeBackendErrorMessage(rawMessage, fallbackMessage) {
   }
 
   const lowered = parsedMessage.toLowerCase();
+  if (lowered.includes('python3') && lowered.includes('no such file')) {
+    return 'YouTube is temporarily unavailable on this backend. Use Open web fallback to continue.';
+  }
   if (lowered.includes('sign in to confirm you') || lowered.includes('not a bot')) {
-    return 'YouTube temporarily blocked this request. Please try again in a moment.';
+    return 'YouTube is temporarily rate-limited on this backend. Use Open web fallback to continue.';
   }
 
   return parsedMessage;
+}
+
+function buildYouTubeWebFallbackUrl(youtubeUrl) {
+  const safe = encodeURIComponent(String(youtubeUrl || '').trim());
+  return `https://cobalt.tools/?u=${safe}`;
 }
 
 function guessMimeTypeFromFileName(fileName, kind = '') {
@@ -2747,6 +2755,25 @@ export default function App() {
     }
   }, [loadYouTubeOptions, youtubeLink]);
 
+  const onOpenYouTubeWebFallback = useCallback(async () => {
+    if (!youtubeLink) {
+      Alert.alert('Missing YouTube link', 'Paste a valid YouTube URL first.');
+      return;
+    }
+
+    const fallbackUrl = buildYouTubeWebFallbackUrl(youtubeLink);
+    try {
+      const supported = await Linking.canOpenURL(fallbackUrl);
+      if (!supported) {
+        Alert.alert('Cannot open browser', 'Your device cannot open the fallback page right now.');
+        return;
+      }
+      await Linking.openURL(fallbackUrl);
+    } catch {
+      Alert.alert('Open failed', 'Could not open the fallback page. Please try again.');
+    }
+  }, [youtubeLink]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -3046,7 +3073,12 @@ export default function App() {
                     )}
 
                     {!!youtubeOptionsError && (
-                      <Text style={styles.youtubeErrorText}>{youtubeOptionsError}</Text>
+                      <>
+                        <Text style={styles.youtubeErrorText}>{youtubeOptionsError}</Text>
+                        <Pressable style={styles.youtubeFallbackButton} onPress={onOpenYouTubeWebFallback}>
+                          <Text style={styles.youtubeFallbackButtonText}>Open web fallback</Text>
+                        </Pressable>
+                      </>
                     )}
                   </View>
                 )}
@@ -3699,6 +3731,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     color: '#b91c1c',
+  },
+  youtubeFallbackButton: {
+    marginTop: 8,
+    minHeight: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#0f172a',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  youtubeFallbackButtonText: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '800',
+    color: '#0f172a',
   },
   button: {
     minHeight: 44,
