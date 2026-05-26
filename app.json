@@ -1,14 +1,14 @@
 {
   "expo": {
-    "name": "Instasave",
-    "slug": "instasave",
-    "scheme": "instasave",
+    "name": "Mediqra",
+    "slug": "mediqra",
+    "scheme": "mediqra",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/mediqra.png",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/mediqra.png",
       "resizeMode": "contain",
       "backgroundColor": "#050608"
     },
@@ -25,10 +25,10 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/mediqra_adaptive.png",
         "backgroundColor": "#050608"
       },
-      "package": "com.jaison007.InstaSave"
+      "package": "com.jaison007.mediqra"
     },
     "plugins": [
       [
@@ -39,7 +39,7 @@
       ]
     ],
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/mediqra.png"
     }
   }
 }

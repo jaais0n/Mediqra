@@ -41,15 +41,15 @@ const INSTAGRAM_DOWNLOAD_HEADERS = {
   'Sec-Fetch-Site': 'same-site',
 };
 const DEFAULT_API_BASE_URL = 'https://backendmediqra.vercel.app';
-const API_BASE_URL_STORAGE_FILENAME = 'instasave_api_base_url.txt';
+const API_BASE_URL_STORAGE_FILENAME = 'mediqra_api_base_url.txt';
 const CONFIGURED_API_BASE_URLS = [
   Constants?.expoConfig?.extra?.apiBaseUrl,
   Constants?.manifest2?.extra?.apiBaseUrl,
   DEFAULT_API_BASE_URL,
 ];
 let runtimeApiBaseUrlOverride = '';
-const HISTORY_STORAGE_FILENAME = 'instasave_history.json';
-const DOWNLOADS_DIRECTORY_URI_FILENAME = 'instasave_downloads_directory_uri.txt';
+const HISTORY_STORAGE_FILENAME = 'mediqra_history.json';
+const DOWNLOADS_DIRECTORY_URI_FILENAME = 'mediqra_downloads_directory_uri.txt';
 const LOCAL_DOWNLOADS_DIRNAME = 'downloads';
 const MEDIA_SUBFOLDERS = {
   audio: 'MP3',
@@ -448,7 +448,7 @@ async function saveFileToLocalDownloads(sourceUri, preferredFileName) {
     return sourceUri;
   }
 
-  const safeName = sanitizeLocalFileName(preferredFileName, `instasave_${Date.now()}`);
+  const safeName = sanitizeLocalFileName(preferredFileName, `mediqra_${Date.now()}`);
   const candidatePath = `${directory}${safeName}`;
 
   const existing = await FileSystem.getInfoAsync(candidatePath);
@@ -838,13 +838,13 @@ function buildHiddenExtractorScript(sessionId) {
     const open = XMLHttpRequest.prototype.open;
     const send = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this.__instasaveUrl = String(url || '');
+      this.__mediqraUrl = String(url || '');
       return open.call(this, method, url, ...rest);
     };
     XMLHttpRequest.prototype.send = function(...args) {
       this.addEventListener('load', function() {
         try {
-          if (String(this.__instasaveUrl || '').indexOf('/youtubei/v1/player') !== -1 && this.responseText) {
+          if (String(this.__mediqraUrl || '').indexOf('/youtubei/v1/player') !== -1 && this.responseText) {
             post('player_api', this.responseText);
           }
         } catch {}
@@ -1961,7 +1961,7 @@ export default function App() {
       const asset = await MediaLibrary.createAssetAsync(fileUri);
       if (Platform.OS === 'android' && asset) {
         try {
-          await MediaLibrary.createAlbumAsync('InstaSave', asset, false);
+          await MediaLibrary.createAlbumAsync('Mediqra', asset, false);
         } catch {
           // Album may already exist; ignore.
         }
@@ -1990,7 +1990,7 @@ export default function App() {
   }, []);
 
   const saveFileToPhoneDownloads = useCallback(async (sourceUri, preferredFileName, kind = '') => {
-    const safeName = sanitizeLocalFileName(preferredFileName, `instasave_${Date.now()}`);
+    const safeName = sanitizeLocalFileName(preferredFileName, `mediqra_${Date.now()}`);
 
     if (Platform.OS !== 'android' || !FileSystem.StorageAccessFramework) {
       return saveFileToLocalDownloads(sourceUri, safeName);
@@ -1998,7 +1998,7 @@ export default function App() {
 
     const saf = FileSystem.StorageAccessFramework;
     const mimeType = guessMimeTypeFromFileName(safeName, kind);
-    const fileNameWithoutExtension = safeName.replace(/\.[^/.]+$/, '') || `instasave_${Date.now()}`;
+    const fileNameWithoutExtension = safeName.replace(/\.[^/.]+$/, '') || `mediqra_${Date.now()}`;
 
     const pickDirectoryManually = async () => {
       const initialDownloadsTreeUri = 'content://com.android.externalstorage.documents/tree/primary%3ADownload';
@@ -2178,7 +2178,7 @@ export default function App() {
     }
 
     saveDownloadHistory(downloadHistory).catch((error) => {
-      console.log('Failed to save InstaSave history:', error?.message || error);
+      console.log('Failed to save Mediqra history:', error?.message || error);
     });
   }, [downloadHistory, historyLoaded]);
 
@@ -2679,7 +2679,7 @@ export default function App() {
       const shortcode = extractShortcode(instagramLinkToDownload) || 'instagram';
       for (let index = 0; index < mediaInfos.length; index += 1) {
         const mediaInfo = mediaInfos[index];
-        const targetPath = `${FileSystem.cacheDirectory}instasave_${Date.now()}_${index}${mediaInfo.extension}`;
+        const targetPath = `${FileSystem.cacheDirectory}mediqra_${Date.now()}_${index}${mediaInfo.extension}`;
         const downloadHeaders = {
           ...INSTAGRAM_DOWNLOAD_HEADERS,
           Referer: normalizedLinkForRequest,
@@ -2864,7 +2864,7 @@ export default function App() {
           : (bestMp3Only[0]?.formatId || selectedYouTubeMp3FormatId || '')
       );
 
-      const targetPath = `${FileSystem.cacheDirectory}instasave_yt_${Date.now()}.${resolvedFormat}`;
+      const targetPath = `${FileSystem.cacheDirectory}mediqra_yt_${Date.now()}.${resolvedFormat}`;
       const candidates = buildYouTubeDownloadUrlsForAllHosts(youtubeUrl, resolvedFormat, resolvedFormatId);
       const fallbackCandidate = buildLocalYouTubeDownloadUrl(youtubeUrl, resolvedFormat, resolvedFormatId);
       const candidateUrls = candidates.length > 0
@@ -3114,7 +3114,7 @@ export default function App() {
       >
         <View style={styles.header}>
           <View style={styles.kickerPill}>
-            <Text style={styles.kickerText}>Instasave</Text>
+            <Text style={styles.kickerText}>Mediqra</Text>
           </View>
           <Text style={styles.title}>Download Instagram media</Text>
           <Text style={styles.subtitle}>
